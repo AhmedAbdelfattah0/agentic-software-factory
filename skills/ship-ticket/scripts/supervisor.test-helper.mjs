@@ -61,6 +61,8 @@ if (sub === 'gate review') {
   const extra = Object.keys(input).filter((k) => !['review_execution', 'kind', 'primary', 'second_opinion', 'reconciliation', 'repair_prompt_file'].includes(k));
   if (extra.length) { process.stderr.write('run-engine: bad_input: unknown input field(s) ' + extra.join(',')); process.exit(1); }
   if (S.review_chain.some((r) => r.review_execution === input.review_execution && r.kind === input.kind)) refuse('chain_broken');
+  // the real gate refuses a same-provider second opinion when a builder ran on that provider's unresolved default model
+  if (beh === 'refuse_claude_second' && /^claude:/.test(input.second_opinion?.reviewer_identity || '')) refuse('reviewer_is_builder');
   const outcome = input.primary.outcome;
   const fixes = (input.reconciliation?.dispositions || []).filter((d) => d.disposition === 'fix').map((d) => d.finding_id);
   if (input.kind === 'original' && outcome === 'FAIL' && fixes.length) {
@@ -114,7 +116,7 @@ process.stdin.on('end', () => {
     if (sp === 'usage_limit') { process.stdout.write(JSON.stringify({ type: 'error', message: 'usage limit reached' }) + '\n'); return; }
     // each provider's real final-message shape (worker-report.mjs finalMessage parses them)
     process.stdout.write(provider === 'codex' ? JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(out) } }) + '\n'
-      : JSON.stringify({ type: 'result', is_error: false, result: JSON.stringify(out), ...((beh.report_model || {})[leg] ? { usage: { input_tokens: 1 }, modelUsage: { [beh.report_model[leg]]: { inputTokens: 1 } } } : {}) }));
+      : JSON.stringify({ type: 'result', is_error: false, result: JSON.stringify(out), ...((beh.report_model || {})[leg] ? { usage: { input_tokens: 1 }, modelUsage: Object.fromEntries([].concat(beh.report_model[leg]).map((m) => [m, { inputTokens: 1 }])) } : {}) }));
   };
   const slow = leg === 'second' && (beh.second_provider || {})[provider] === 'hang' ? 'hang' : (beh.slow || {})[leg];
   if (slow === 'hang') setInterval(() => {}, 1e6); else setTimeout(finish, slow || 0);
@@ -122,8 +124,8 @@ process.stdin.on('end', () => {
 `;
 
 /** The default approved review routes of a world: one second-opinion route (the owner's configuration, not the engine's). */
-export const CODEX_ROUTE = Object.freeze({ role: 'second_opinion', provider: 'codex', model: 'codex-strong-x' });
-export const FABLE_ROUTE = Object.freeze({ role: 'second_opinion', provider: 'claude', model: 'claude-fable-x' });
+export const CODEX_ROUTE = Object.freeze({ role: 'second_opinion', provider: 'codex', model: 'codex-strong-5' });
+export const FABLE_ROUTE = Object.freeze({ role: 'second_opinion', provider: 'claude', model: 'claude-fable-5' });
 
 /** Create a world: tickets [{ key, deps?, phase?, behaviour? }]; `routes` = the manifest's review_routes. Returns { dir, manifest }. */
 export function makeWorld(dir, tickets, { merge_strategy, routes = [CODEX_ROUTE] } = {}) {
@@ -153,7 +155,7 @@ export const worldClock = (dir) => testClock({ bootId: BOOT, nowNs: () => BigInt
 function fakeNext(dir, t) {
   const S = readState(dir, t.key);
   const cmd = (c, input) => ({ script: 'run-engine.mjs', cmd: c, flags: {}, ...(input ? { input } : {}) });
-  const go = (action, c, input, extra = {}) => ({ action, phase: 'X', command: cmd(c, input), facts: { candidate_id: 'cand', excluded_reviewers: [] }, ...extra });
+  const go = (action, c, input, extra = {}) => ({ action, phase: 'X', command: cmd(c, input), facts: { candidate_id: 'cand', excluded_reviewers: S.builders ?? [] }, ...extra });
   const stop = (code, cls) => ({ action: 'stop', phase: 'X', command: null, code, stop_class: cls, reason: code, facts: {} });
   switch (S.phase) {
     case 'build': return go('run', 'drive');

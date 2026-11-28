@@ -154,7 +154,7 @@ test('routing: every review leg and the RCA run on modelMap[tier] of their route
   // original: primary, second, reconcile; confirmation: primary, second (no reconciliation); then one RCA
   assert.deepEqual(agents.map((a) => a.leg).sort(), ['primary', 'primary', 'rca', 'reconcile', 'second', 'second']);
   for (const a of agents) {
-    if (a.leg === 'second') assert.deepEqual([a.provider, a.args.slice(-2)], ['codex', ['codex-strong-x', '-']], 'second opinion: its own route, modelMap.strong');
+    if (a.leg === 'second') assert.deepEqual([a.provider, a.args.slice(-2)], ['codex', ['codex-strong-5', '-']], 'second opinion: its own route, modelMap.strong');
     else { assert.equal(a.provider, 'claude'); assert.deepEqual(a.args.slice(-2), ['--model', 'claude-strong-x'], `${a.leg}: modelMap.strong of the approved config`); }
     assert.ok(a.args.includes('dontAsk') || a.args.includes('read-only'), 'read-only agent task');
   }
@@ -424,7 +424,7 @@ test('install/uninstall: print by default; --write touches only two LaunchAgents
 // ------------------------------------------------------------------------------------------------- the real defaults
 
 test('real engine smoke: real next/readRun, state, readTicket, run dir and repo id; the drive output closes the --last loop to REVIEW', { skip: SKIP, timeout: 300000 }, async (t) => {
-  const fx = fixture(t, { commit: true, config: { modelMap: { strong: 'claude-strong-x' }, testCommands: { proof: { cmd: process.execPath, args: ['-e', ''] } } } });
+  const fx = fixture(t, { commit: true, config: { modelMap: { strong: 'claude-strong-x', inherit: 'claude-build-5', economy: 'claude-econ-5' }, testCommands: { proof: { cmd: process.execPath, args: ['-e', ''] } } } });
   const init = fx.cli('init', { dag: fx.dagFile });
   assert.equal(init.status, 0, init.stdout + init.stderr);
   const manifest = { schema: 'ship-ticket-wave-v1', wave_id: 'W-R', endpoint: 'SHIP_READY', heavy_slots: 1, review_routes: [CODEX_ROUTE],
@@ -509,7 +509,7 @@ test('install --write says the written plists activate at the next login', { ski
 
 // real engine: the run lock and the real review gate (the fake engine models neither)
 function realWave(t, config = {}, behaviour = undefined) {
-  const fx = fixture(t, { commit: true, config: { modelMap: { strong: 'claude-strong-x' }, testCommands: { proof: { cmd: process.execPath, args: ['-e', ''] } }, ...config },
+  const fx = fixture(t, { commit: true, config: { modelMap: { strong: 'claude-strong-x', inherit: 'claude-build-5', economy: 'claude-econ-5' }, testCommands: { proof: { cmd: process.execPath, args: ['-e', ''] } }, ...config },
     ...(behaviour ? { behaviour } : {}) });
   const init = fx.cli('init', { dag: fx.dagFile });
   assert.equal(init.status, 0, init.stdout + init.stderr);
@@ -570,7 +570,7 @@ test('real gate: FAIL -> supervisor repair brief -> repair_owed -> repair -> con
   w.art('primary-original', p1);
   w.art('second-original', s1);
   // the supervisor stamps the second opinion's route and identity from what it launched: the reconciler echoes the stamped artifact
-  const s1Stamped = { ...s1, route: 'codex:codex-strong-x', reviewer_identity: 'codex:codex-strong-x' };
+  const s1Stamped = { ...s1, route: 'codex:codex-strong-5', reviewer_identity: 'codex:codex-strong-5' };
   w.art('reconcile-original', { kind: 'original', review_execution: 'rx-1', primary: p1, second_opinion: s1Stamped, reconciliation: { dispositions: [{ finding_id: 'F1', source: 'primary', disposition: 'fix' }] } });
   await w.run((J) => Object.values(J.ops).some((x) => x.op === 'review.reconcile'));
   const held = await lockOf(w.fx); // the collect launches while the run lock is held
@@ -606,14 +606,14 @@ test('second opinion: the first manifest route runs (Codex), stamped from the la
   assert.equal(SUP.SECOND_OPINION_BUDGET_MS, 10 * 60 * 1000);
   const so = J.ops['rtest:T1:review.second:rx-1'];
   assert.equal(so.bound_ms, SUP.SECOND_OPINION_BUDGET_MS, 'one attempt, on the policy budget');
-  assert.deepEqual(so.requested, { provider: 'codex', model: 'codex-strong-x' });
-  assert.deepEqual(so.launched, { provider: 'codex', model: 'codex-strong-x' }, 'what the carrier adapter actually built');
+  assert.deepEqual(so.requested, { provider: 'codex', model: 'codex-strong-5' });
+  assert.deepEqual(so.launched, { provider: 'codex', model: 'codex-strong-5' }, 'what the carrier adapter actually built');
   const c = J.ops['rtest:T1:review:rx-1'];
-  assert.equal(c.second_opinion, 'codex:codex-strong-x');
+  assert.equal(c.second_opinion, 'codex:codex-strong-5');
   assert.equal(c.same_provider, false);
   const input = JSON.parse(readFileSync(c.files.input, 'utf8'));
-  assert.equal(input.second_opinion.reviewer_identity, 'codex:codex-strong-x', 'identity stamped from the launch, not self-reported');
-  assert.equal(input.second_opinion.route, 'codex:codex-strong-x');
+  assert.equal(input.second_opinion.reviewer_identity, 'codex:codex-strong-5', 'identity stamped from the launch, not self-reported');
+  assert.equal(input.second_opinion.route, 'codex:codex-strong-5');
   assert.equal(secondLegs(dir).length, 1);
   // a budget_ms in the route is that route's per-attempt bound (at most the policy figure)
   const dir2 = world(t, [{ key: 'T1', phase: 'review_owed' }], { routes: [{ ...CODEX_ROUTE, budget_ms: 120000 }] });
@@ -631,10 +631,10 @@ test('second opinion: Codex unavailable (nonexistent binary; a usage-limit reply
   assert.match(String(codex.result.spawn_error), /ENOENT/, 'the launcher reports the missing provider binary (a spawn error, launcher exit 127)');
   const fable = J.ops['rtest:T1:review.second-2:rx-1'];
   assert.equal(fable.result.outcome, 'ran');
-  assert.deepEqual(fable.launched, { provider: 'claude', model: 'claude-fable-x' });
-  assert.deepEqual(secondLegs(dir).map((e) => [e.provider, e.args.slice(-2)]), [['claude', ['--model', 'claude-fable-x']]], 'one fallback attempt');
+  assert.deepEqual(fable.launched, { provider: 'claude', model: 'claude-fable-5' });
+  assert.deepEqual(secondLegs(dir).map((e) => [e.provider, e.args.slice(-2)]), [['claude', ['--model', 'claude-fable-5']]], 'one fallback attempt');
   const c = J.ops['rtest:T1:review:rx-1'];
-  assert.equal(c.second_opinion, 'claude:claude-fable-x');
+  assert.equal(c.second_opinion, 'claude:claude-fable-5');
   assert.equal(c.same_provider, true, 'recorded as a same-provider independent review, never as cross-provider agreement');
   assert.ok(J.ship_ready.T1);
   // a usage-limit reply (no agent message) is unusable too: one fallback attempt
@@ -687,15 +687,15 @@ test('second opinion provenance: a launched model that differs from the requeste
   assert.match(J2.blocked.T1.reason, /claude-other-model/);
   assert.equal(count(dir2, (e) => e.kind === 'gate review'), 0);
   // the reported model matching the request passes
-  const dir3 = world(t, [{ key: 'T1', phase: 'review_owed', behaviour: { report_model: { second: 'claude-fable-x' } } }], { routes: [FABLE_ROUTE] });
+  const dir3 = world(t, [{ key: 'T1', phase: 'review_owed', behaviour: { report_model: { second: 'claude-fable-5' } } }], { routes: [FABLE_ROUTE] });
   assert.ok((await settleAll(dir3)).ship_ready.T1);
 });
 
 test('wave validation: an unknown provider, a missing second_opinion route or a budget above the policy is refused before any effect', { skip: SKIP }, async (t) => {
   const cases = [
-    [[{ role: 'second_opinion', provider: 'nosuch', model: 'm' }], 'review_route_provider_unknown'],
-    [[{ role: 'second_opinion', provider: 'gemini', model: 'm' }], 'review_route_provider_unknown'], // a carrier provider without a verified adapter
-    [[{ role: 'primary', provider: 'claude', model: 'm' }], 'second_opinion_route_missing'],
+    [[{ role: 'second_opinion', provider: 'nosuch', model: 'm-1' }], 'review_route_provider_unknown'],
+    [[{ role: 'second_opinion', provider: 'gemini', model: 'm-1' }], 'review_route_provider_unknown'], // a carrier provider without a verified adapter
+    [[{ role: 'primary', provider: 'claude', model: 'claude-primary-5' }], 'second_opinion_route_missing'],
     [null, 'second_opinion_route_missing'],
     [[{ ...CODEX_ROUTE, budget_ms: SUP.SECOND_OPINION_BUDGET_MS + 1 }], 'second_opinion_budget_invalid'],
   ];
@@ -708,7 +708,7 @@ test('wave validation: an unknown provider, a missing second_opinion route or a 
     assert.equal((await sweep(opts(dir), worldDeps(dir))).code, 0, 'the sweep never stops enforcing on a route problem');
   }
   // other roles are optional and ignored (no effect on routing)
-  const dir = world(t, [{ key: 'T1', phase: 'review_owed' }], { routes: [{ role: 'primary', provider: 'codex', model: 'x' }, CODEX_ROUTE] });
+  const dir = world(t, [{ key: 'T1', phase: 'review_owed' }], { routes: [{ role: 'primary', provider: 'codex', model: 'codex-primary-5' }, CODEX_ROUTE] });
   assert.ok((await settleAll(dir)).ship_ready.T1);
 });
 
@@ -816,4 +816,60 @@ test('a sweep kill of an admitted engine command stops it THROUGH the real host-
   assert.equal(s.out.ops[op.op_id], 'killed');
   const gone = (pid) => { try { process.kill(pid, 0); return false; } catch (e) { return e.code === 'ESRCH'; } };
   await waitFor(() => gone(enginePid), 'the engine command host-admit started is gone', { ms: 15000 });
+});
+
+// ------------------------------------------------------------------------------------------------- PR-5b review round 1 repairs
+
+test('provenance is explicit equality: a dated variant or any other reported model is refused; only the exact id passes', { skip: SKIP }, async (t) => {
+  for (const served of ['claude-fable-5-20261101', 'claude-fable-5-other', ['claude-sonnet-4-6', 'claude-fable-5'], ['claude-fable-5', 'claude-opus-4-6']]) {
+    const dir = world(t, [{ key: 'T1', phase: 'review_owed', behaviour: { report_model: { second: served } } }], { routes: [FABLE_ROUTE, CODEX_ROUTE] });
+    const J = await settleAll(dir);
+    assert.equal(J.blocked.T1?.code, 'second_opinion_provenance_mismatch', JSON.stringify(served));
+    assert.equal(J.ops['rtest:T1:review.second-2:rx-1'], undefined, 'never a fallback');
+    assert.equal(count(dir, (e) => e.kind === 'gate review'), 0);
+  }
+  const ok = world(t, [{ key: 'T1', phase: 'review_owed', behaviour: { report_model: { second: ['claude-fable-5'] } } }], { routes: [FABLE_ROUTE] });
+  assert.ok((await settleAll(ok)).ship_ready.T1, 'the exact requested id passes');
+  const codex = world(t, [{ key: 'T1', phase: 'review_owed' }], { routes: [CODEX_ROUTE] }); // codex reports no model: adapter-level only
+  assert.ok((await settleAll(codex)).ship_ready.T1);
+});
+
+test('wave validation refuses an alias (non-full model id) in an approved route, naming the route, before any effect', { skip: SKIP }, async (t) => {
+  for (const model of ['fable', 'opus', 'sonnet', 'gpt']) {
+    const dir = world(t, [{ key: 'T1', phase: 'review_owed' }], { routes: [CODEX_ROUTE, { role: 'second_opinion', provider: 'claude', model }] });
+    const r = await tick(opts(dir), worldDeps(dir));
+    assert.equal(r.code, 2);
+    assert.equal(r.out.code, 'review_route_model_not_full_id', model);
+    assert.match(JSON.stringify(r.out.problems), new RegExp(`claude:${model}`));
+    assert.equal(effects(dir).length, 0);
+  }
+});
+
+test('an unmapped builder tier (provider-default) of a reviewer provider Blocks the ticket before any review leg, naming the fix', { skip: SKIP }, async (t) => {
+  const dir = world(t, [{ key: 'T1', phase: 'review_owed' }, { key: 'T2', phase: 'review_owed' }, { key: 'T3' }], { routes: [CODEX_ROUTE, FABLE_ROUTE] });
+  for (const [k, b] of [['T1', 'claude:provider-default'], ['T2', 'codex:provider-default']]) { const S = readState(dir, k); S.builders = [b]; writeState(dir, k, S); }
+  const J = await settleAll(dir);
+  for (const k of ['T1', 'T2']) {
+    assert.equal(J.blocked[k]?.code, 'reviewer_independence_unmapped_builder', k);
+    assert.match(J.blocked[k].reason, /modelMap/);
+    assert.equal(count(dir, (e) => e.ticket === k && e.kind === 'agent'), 0, `${k}: no review leg ran`);
+  }
+  assert.ok(J.ship_ready.T3);
+});
+
+test('a fallback second opinion the gate refuses Blocks the ticket second_opinion_unavailable (never a permanent gate_refused park)', { skip: SKIP }, async (t) => {
+  const dir = world(t, [{ key: 'T1', phase: 'review_owed', behaviour: { second_provider: { codex: 'fail' }, 'gate review': 'refuse_claude_second' } }, { key: 'T2' }], { routes: [CODEX_ROUTE, FABLE_ROUTE] });
+  const J = await settleAll(dir);
+  assert.equal(J.blocked.T1?.code, 'second_opinion_unavailable', JSON.stringify(J.blocked.T1));
+  assert.match(J.blocked.T1.reason, /reviewer_is_builder/);
+  assert.ok(J.ship_ready.T2);
+});
+
+test('uninstall works for a manifest with no or invalid routes', { skip: SKIP }, (t) => {
+  const dir = world(t, [{ key: 'T1' }], { routes: null });
+  const o = { manifestPath: join(dir, 'manifest.json'), stateDir: join(dir, 'journal'), home: join(dir, 'h') };
+  assert.equal(installPlan(o, worldDeps(dir)).code, 2, 'install still refuses');
+  const r = installPlan({ ...o, remove: true, write: true }, worldDeps(dir));
+  assert.equal(r.code, 0);
+  assert.equal(r.out.outcome, 'removed');
 });

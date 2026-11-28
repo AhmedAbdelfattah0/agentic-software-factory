@@ -216,6 +216,8 @@ function reviewRoutesCheck(m) {
   const all = Array.isArray(m?.review_routes) ? m.review_routes : [];
   const unknown = all.find((r) => !isObj(r) || !supportsAgentProvider(r.provider));
   if (unknown) return { ok: false, code: 'review_route_provider_unknown', detail: `review route provider ${JSON.stringify(unknown?.provider)} has no verified carrier adapter` };
+  const alias = all.find((r) => !isFullModelId(r.model));
+  if (alias) return { ok: false, code: 'review_route_model_not_full_id', detail: `review route ${alias.role} ${alias.provider}:${alias.model} names an alias, not a full model id: use full model ids` };
   const second = reviewRoutesOf(m, 'second_opinion');
   if (!second.length) return { ok: false, code: 'second_opinion_route_missing', detail: 'the approved wave manifest names no second_opinion review route: the mandatory second opinion has no route' };
   const over = second.find((r) => r.budget_ms !== undefined && !(Number.isInteger(r.budget_ms) && r.budget_ms >= 1000 && r.budget_ms <= SECOND_OPINION_BUDGET_MS));
@@ -450,7 +452,17 @@ function reportedModels(o) {
   try { const u = extractUsage(o.route.provider, text); return Array.isArray(u?.models_used) && u.models_used.length ? u.models_used : null; } catch { return null; }
 }
 /** A served model id is the requested one, or its dated/variant form (`<id>-<suffix>`, `<id>[...]`). */
-const servedAs = (served, requested) => { const strip = (m) => String(m).replace(/\[[^\]]*\]$/, ''); return strip(served) === strip(requested) || strip(served).startsWith(`${strip(requested)}-`); };
+/**
+ * Explicit canonical equality (review round 1): a served model is the requested full id, or one listed for it in
+ * SERVED_EQUIVALENTS. The table is EMPTY: no provider dated variant is accepted until it is listed here, deliberately.
+ */
+export const SERVED_EQUIVALENTS = Object.freeze({});
+const servedAs = (served, requested) => served === requested || (SERVED_EQUIVALENTS[requested] ?? []).includes(served);
+/**
+ * A FULL model id (not an alias such as a bare family name): at least two `-`-separated parts and a digit. Aliases resolve
+ * to a provider-chosen model at launch, so an approved route must name the exact id.
+ */
+export const isFullModelId = (m) => typeof m === 'string' && /^[A-Za-z0-9]+(?:[-._:][A-Za-z0-9]+)+$/.test(m) && m.includes('-') && /\d/.test(m);
 
 /**
  * PR-5b: one recorded second-opinion attempt. `usable` with the launch-stamped artifact; `mismatch` when what launched (or what
@@ -463,7 +475,7 @@ function secondVerdict(o) {
   const L = o.launched;
   if (!isObj(L) || L.provider !== o.requested?.provider || L.model !== o.requested?.model) return { mismatch: `launched ${JSON.stringify(L ?? null)} is not the requested route ${JSON.stringify(o.requested ?? null)}` };
   const served = reportedModels(o);
-  if (served && !served.some((m) => servedAs(m, L.model))) return { mismatch: `route ${L.provider}:${L.model} requested, the provider reports it served ${served.join(', ')}` };
+  if (served && !served.every((m) => servedAs(m, L.model))) return { mismatch: `route ${L.provider}:${L.model} requested, the provider reports it served ${served.join(', ')}` };
   const art = agentJson(o);
   if (!isObj(art)) return { why: 'no JSON artifact (unavailable, usage limit or unreadable)' };
   const id = `${L.provider}:${L.model}`;
@@ -495,6 +507,12 @@ async function review(J, ctx, t, S, { kind, rx, facts }) {
       return { blocked: await J.block(t.key, 'second_opinion_not_distinct', `${name}: route ${plan.provider}:${plan.model} is the primary reviewer's own route`) };
   }
   if (!soRoutes.length) return { blocked: await J.block(t.key, 'second_opinion_route_missing', 'no approved second_opinion route') };
+  // a builder on a reviewer provider's unresolved default model makes every reviewer of that provider non-independent
+  // (gate.mjs builderOf): Block up front, before any leg, instead of spending legs on a review the gate must refuse
+  const unmapped = [primaryPlan.provider, ...soRoutes.map((r) => r.provider)].filter((pv, i, a) => a.indexOf(pv) === i)
+    .filter((pv) => (facts.excluded_reviewers ?? []).includes(`${pv}:provider-default`));
+  if (unmapped.length) return { blocked: await J.block(t.key, 'reviewer_independence_unmapped_builder',
+    `a builder ran on ${unmapped.map((pv) => `${pv}:provider-default`).join(', ')}: no ${unmapped.join('/')} reviewer can be shown independent; map every builder tier in the DAG modelMap`) };
   const started = [];
   if (!leg('primary')) started.push(await launch(J, ctx, t, { op: `${prefix}.primary`, gen: rx, bound: AGENT_BOUND_MS, route: primaryRoute, nodeId: `${prefix}-primary`,
     prompt: reviewPrompt(t, 'primary', kind, rx, facts) }));
@@ -569,7 +587,13 @@ async function collect(J, ctx, t, { prefix, kind, rx, input, provenance }) {
   if (inChain(ctx.deps.readState(t), { rx, kind })) return { collected: 'in_chain' };
   const g = launchGen(J, repo, t.key, prefix, rx);
   const prior = J.op(opId(repo, t.key, prefix, g.gen));
-  if (prior?.state === 'recorded') return prior.result?.outcome === 'collected' ? { collected: prior.op_id } : { parked: 'gate_refused', op_id: prior.op_id, code: prior.result?.code ?? null };
+  if (prior?.state === 'recorded') {
+    if (prior.result?.outcome === 'collected') return { collected: prior.op_id };
+    // a FALLBACK second opinion the real gate refused: the approved routes are spent, so the ticket alone is Blocked (never parked forever)
+    if (prior.second_opinion_op && !prior.second_opinion_op.endsWith(`:${prefix}.second:${rx}`))
+      return { blocked: await J.block(t.key, 'second_opinion_unavailable', `the gate refused the fallback second opinion ${prior.second_opinion_op}: ${prior.result?.code ?? 'refused'}`, { op_id: prior.op_id, gate_code: prior.result?.code ?? null }) };
+    return { parked: 'gate_refused', op_id: prior.op_id, code: prior.result?.code ?? null };
+  }
   if (!prior && g.spent) return { blocked: await J.block(t.key, 'retries_exhausted', `${g.last.op_id}: gate review recorded nothing ${RETRY_LIMITS[g.spent]} times (${g.last.result?.cause ?? g.spent})`, { op_id: g.last.op_id }) };
   const wait = prior ? null : heldWait(ctx, g);
   if (wait) return wait;
@@ -830,7 +854,7 @@ export function plistXml({ waveId, job, manifestPath, stateDir, home, workdir })
 
 /** install/uninstall: print by default; `write` writes or removes ONLY the two label files under <home>/Library/LaunchAgents. Never runs launchctl. */
 export function installPlan({ manifestPath, stateDir, home = homedir(), remove = false, write = false }, deps = {}) {
-  const w = loadWave(manifestPath, withDefaults(deps));
+  const w = loadWave(manifestPath, withDefaults(deps), { routes: !remove }); // uninstall never needs valid routes
   if (!w.ok) return { code: 2, out: { outcome: 'refused', code: w.code } };
   const dir = join(home, 'Library', 'LaunchAgents');
   const jobs = ['tick', 'sweep'].map((job) => ({ job, label: label(w.manifest.wave_id, job), path: join(dir, `${label(w.manifest.wave_id, job)}.plist`),

@@ -214,8 +214,10 @@ What it enforces:
   `second_opinion` in the approved wave manifest (`{role, provider, model,
   budget_ms?}`; a provider id must have a verified carrier adapter), one
   attempt per route on a 10-minute budget, and record `second_opinion:
-  <provider:model>` with `same_provider`; a launched model that is not the
-  requested one is refused.
+  <provider:model>` with `same_provider`; a launched or provider-reported model
+  that is not exactly the requested one is refused. Use full model ids: an alias
+  in a route is refused at wave validation. Map every builder tier in
+  `modelMap`: a builder on a reviewer provider's default model Blocks the review.
 - **Plan roots are orchestrator-owned.** A change under `.specs`/`.spec` during a
   run is RUN-STATE bookkeeping: it is reported in `orchestrator_paths_changed`
   and is not a `writes_outside_ownership` violation.
