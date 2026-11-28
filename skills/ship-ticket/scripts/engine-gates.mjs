@@ -25,7 +25,7 @@ import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './e
 import { shipStage, retainedStagePolicy } from './stage-obligations.mjs';
 import { earlyChecksOn } from './engine-dag.mjs';
 import { proveGate, proveRefusal, staleProofRefusal, proofInputs, sameInputs, proofExtras, entryTimeout } from './engine-prove.mjs'; // S5
-import { successionOn, parserOf, prepareRedTree, removeRedTree, generationReview, successionShipRefusal, recordReviewed, recordRenewal } from './engine-succession.mjs'; // PR-4b
+import { successionOn, parserOf, prepareRedTree, removeRedTree, forgetRedTree, redRunEnv, generationReview, successionShipRefusal, recordReviewed, recordRenewal } from './engine-succession.mjs'; // PR-4b
 import { spawnSpec } from './carrier.mjs';
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
@@ -99,7 +99,7 @@ async function redGate(E, input, candidate) {
   const pin = pinnedSpecs(node, input.specs, addendumSpecs);
   if (pin.code) return gateNo(pin.code, [pin.reason]);
   const baseCommit = baseCommit_(E.ctx.repoRoot, E.S);
-  // PR-4b D-RED (config.succession only): RED runs in a detached worktree of the APPROVED BASE, prepared by the declared
+  // PR-4b D-RED (config.succession only): RED runs in a verified export of the APPROVED BASE, prepared by the declared
   // environment, plus the approved test-input overlay; never on the candidate tree, never with the checkout's dependencies.
   let tree = null;
   if (successionOn(E.S)) {
@@ -112,19 +112,24 @@ async function redGate(E, input, candidate) {
     v = await gateRed({ state: E.S, node: node.id, command: { cmd: runner.cmd, args: runner.args ?? [] }, format: runner.format,
       specs: pin.specs, baselineCandidate: candidate, timeoutMs: clampTimeout(E.S.config.timeoutMs), resources: [...node.resources], ...(slot ? { slot } : {}),
       ...(tree ? { parser: parserOf(E.S) } : {}) }, tree ? baseTreeDeps(E, tree.dir) : runnerDeps(E));
-  } finally { if (tree) removeRedTree(E.ctx.repoRoot, tree.dir); }
+  } finally { if (tree) removeRedTree(tree.dir); }
   E.S = v.state; // gateRed re-verified the binding (deps.verifyBinding) before committing any evidence
-  // PR-4b: the evidence names the parser that read it and the base worktree it ran in (succession runs only)
-  const where = tree ? { parser: parserOf(E.S), base_tree: { commit: tree.commit, overlay: tree.overlay, environment: tree.environment } } : {};
+  if (tree) forgetRedTree(E.S, tree.dir); // PR-4b: removed above; a failed removal stays recorded and the next entry retries it
+  // PR-4b: the evidence names the parser that read it and the base tree it ran in (succession runs only)
+  const where = tree ? { parser: parserOf(E.S), base_tree: { commit: tree.commit, dir: tree.dir, verified: tree.verified, overlay: tree.overlay, environment: tree.environment } } : {};
   if (v.ok && slot) { Object.assign(E.S.gates.red_addendum[slot.key], { command: runner.name, base_commit: baseCommit, ...where }); recordRenewal(E.S, 'red_addendum', slot.key, v.evidence.attempt_id); }
   else if (v.ok) { Object.assign(E.S.gates.red[node.id], { command: runner.name, base_commit: baseCommit, ...where }); delete E.S.gates.red_invalid?.[node.id]; recordRenewal(E.S, 'red', node.id, v.evidence.attempt_id); }
   const { state: _s, ...out } = v;
   return out;
 }
 
-/** PR-4b: gateRed deps that run inside the base worktree `dir` (the RED command, and each setup step) and read spec digests there. */
+/**
+ * PR-4b: gateRed deps that run inside the base tree `dir` (cwd; the RED command and each setup step) with the scrubbed
+ * environment (engine-succession.mjs redRunEnv: no GIT_*, NODE_PATH, NODE_OPTIONS, npm_config_* pointing at the candidate), and
+ * read spec digests there.
+ */
 function baseTreeDeps(E, dir) {
-  const { ctx } = E, platform = ctx.platform ?? process.platform, env = ctx.env ?? process.env;
+  const { ctx } = E, platform = ctx.platform ?? process.platform, env = redRunEnv(ctx.env ?? process.env);
   return io.gateRedDeps({ repoRoot: dir, dir: E.P.attempts, platform, env, alive: E.alive, spawnFn: ctx.spawn, ...(ctx.killGraceMs ? { killGraceMs: ctx.killGraceMs } : {}),
     commit: async (snap) => { E.S = snap; await E.commit(); }, toSpec: (cmd, args) => spawnSpec(cmd, args, platform, env),
     verifyBinding: () => E.verifyBinding(), deadlineClock: ctx.deadlineClock });
@@ -211,7 +216,7 @@ async function reviewGate(E, input, candidate) {
   if (unitExecution(S, input.review_execution)) return gateNo('chain_broken', [`review_execution ${input.review_execution} belongs to a unit review chain`]);
   const originals = S.review_chain.filter(r => r.kind === 'original');
   // PR-4b (C2 (a)): a review-opening succession generation authorizes ONE fresh original naming it (no RETRY is written or synthesized)
-  const byGeneration = generationReview(S, input);
+  const byGeneration = generationReview(S, input, candidate);
   if (byGeneration && !byGeneration.ok) return byGeneration;
   let retry = null;
   if (input.kind === 'original' && originals.length && !byGeneration) {

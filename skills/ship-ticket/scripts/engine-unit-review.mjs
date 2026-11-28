@@ -202,7 +202,8 @@ function original(E, input, u, rv, v, bind, candidate) {
   if (opens && !(nonEmpty(brief) && isAbsolute(brief) && existsSync(brief) && statSync(brief).isFile())) return no('repair_prompt_missing', ['an accepted unit FAIL opens a repair: repair_prompt_file must be the absolute path of its brief']);
   const rereview = R.chain.some(r => r.kind === 'original');
   // PR-4b: the one unit re-review a successor generation authorized (its evidence was rebound) spends no slot of the ceiling
-  const byGeneration = rereview && S.unit_checks[u].generation?.rereview === true;
+  const gen = S.unit_checks[u].generation;
+  const byGeneration = rereview && gen?.rereview === true && rv.reviewed_evidence === gen.evidence; // the review of the evidence the generation invalidated
   // Decide the spend before any mutation. A repair holds its whole cycle (repair spent now; its
   // re-check and confirmation held for it). A FAIL the ceiling cannot carry is recorded, terminal.
   const { limit, used, reserved = 0 } = ceiling(S), room = limit - used - reserved;
@@ -220,8 +221,8 @@ function original(E, input, u, rv, v, bind, candidate) {
   for (const r of S.repairs) if (r.unit === u && r.state === 'pending') {
     r.state = 'cancelled'; r.reason = `superseded by unit review ${rx}`; releaseHold(S, r.review_execution, 'superseded');
   }
+  if (gen?.rereview) gen.rereview = false; // consumed by this unit's next original, whatever it is (a first review included)
   if (byGeneration) {
-    S.unit_checks[u].generation.rereview = false;
     note(S, 'UNIT_REVIEW_CYCLE', { unit: u, kind: 'unit_rereview', trigger: { cause: 'generation', generation: S.unit_checks[u].generation.g, predecessor: rv.review_execution },
       used: S.unit_ceiling?.used ?? 0, limit });
   } else if (rereview && affordReview) spendCeiling(S, u, 'unit_rereview', retry ? { cause: 'retry', predecessor: retry.predecessor, authorized_by: retry.authorized_by }

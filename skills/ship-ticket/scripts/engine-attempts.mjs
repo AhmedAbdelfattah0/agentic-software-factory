@@ -77,6 +77,9 @@ export function redChanges(E, ev) {
   const { S, ctx } = E;
   E.baseCommit ??= baseCommit(ctx.repoRoot, S);
   const changed = Object.entries(ev.spec_digests ?? {}).filter(([f, digest]) => io.repoFileDigest(ctx.repoRoot, f) !== digest).map(([f]) => f);
+  // PR-4b: on a succession run the overlaid test inputs RED executed in the base tree (base_tree.overlay: helpers, designed
+  // baseline harnesses) bind it too; frozen evidence carries no base_tree, so every other run reads spec digests only, as before
+  for (const x of ev.base_tree?.overlay ?? []) if (!changed.includes(x.from) && io.repoFileDigest(ctx.repoRoot, x.from) !== x.digest) changed.push(x.from);
   const moved = ev.base_commit !== undefined && ev.base_commit !== E.baseCommit;
   return changed.length || moved ? { changed, moved } : null;
 }

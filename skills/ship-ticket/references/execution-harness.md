@@ -375,15 +375,24 @@ transition is first recorded `prepared` and the predecessor head is retained und
 `git update-ref` (expected old value: none), so a crash leaves the old run, a prepared transition that the next `succeed`
 resumes, or the committed generation (old and new head OIDs and the ref in its `git` record). Every generation that
 follows a review requires ONE fresh full review (primary and second opinion) naming it (`generation: <g>` on `gate
-review`, no RETRY written); there is no assessment and no review retention. It counts in the two-round rule: after two
+review`, no RETRY written, of exactly the candidate the generation recorded: a later change needs `succeed` again); there is no assessment and no review retention. It counts in the two-round rule: after two
 unsuccessful rounds a review-opening generation needs `rca { differs, evidence }` (`rca_required`). A base generation
 invalidates every RED and a correction the RED whose spec changed; the proof is always renewed; ship-ready refuses
 `red_renewal_pending` and `review_generation_stale` until both are recorded for the new base. RED on a succession run runs
-in a detached worktree of the approved base (in the OS temp dir, so no checkout `node_modules` is an ancestor; the
-registration lives in the common dir and is removed on every path), with only the approved test inputs overlaid, after the
-declared `config.redEnvironment.setup` steps ran there under the runner protocol inside `gate red` (a heavy command); no
-declared environment gives `red_baseline_missing` (Blocked), and the checkout's dependencies are never linked. The RED
-evidence records `parser: 2` and its `base_tree`. A spec importing a candidate-changed helper outside the RED node's writes
+in an export of the approved base: a fresh `mkdtemp` directory in the OS temp dir (refused, `red_base_unsafe`, when that dir
+is inside the repository or has an ancestor `node_modules`), written from raw blobs with no checkout, so no filter,
+attribute, hook or config of the candidate repository applies, and verified against the base blob ids before RED; its path
+is recorded in the run state and removed on every path (a crash leftover at the next `gate red`). Only the approved test
+inputs are overlaid. The declared `config.redEnvironment.setup` steps then run there, inside `gate red` (a heavy command),
+under the runner protocol: its pre-launch reconcile runs first (a live setup or RED group of the node, or a live holder of
+its resources, refuses `runner_alive` / `resource_locked` before anything is removed or launched), each step holds the
+node's resources and a persisted deadline, and a held lock is never overwritten. Setup and RED run with a scrubbed
+environment (no `GIT_*`, `NODE_PATH`, `NODE_OPTIONS`, `npm_config_*`, `INIT_CWD`). No declared environment gives
+`red_baseline_missing` (Blocked), and the checkout's dependencies are never linked. The RED evidence records `parser: 2` and
+its `base_tree` (overlay inputs with digests: a later change of an overlaid helper invalidates RED like a spec change). A
+generation re-records only the fingerprints it authorizes (its recorded candidate and base deltas). If `succeed` is killed
+inside `git update-ref`, `retained_ref_locked` names the stale `<ref>.lock`: once no git process runs, remove it and run
+`succeed` again; the ref is written with `core.fsync=reference`. A spec importing a candidate-changed helper outside the RED node's writes
 is refused (`red_helper_dependency`). Completed node outputs, attempts, the review chain, rounds and stage obligations are
 kept; unit evidence is rebound through its own binding, and each unit the generation invalidates gets one re-check and
 unit re-review that spend no `unitRecheckCeiling` slot and count no invalidation storm.

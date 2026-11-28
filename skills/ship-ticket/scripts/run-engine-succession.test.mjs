@@ -22,8 +22,9 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, readdirSync, realpathSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -606,3 +607,124 @@ test('P4-11b unit reviews (config.unitReview): after a base move each rebound un
   ok(ship);
   assert.equal(ship.out.code, 'ship_ready');
 });
+
+// ------------------------------------------------------------------ review round 1 regressions (REVIEW-PR4b-OPUS MAJOR-1..3, Codex 4/5, m1)
+
+const HSPEC = "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { value } from '../src/impl.mjs';\nimport { expected } from './helpers/h.mjs';\n"
+  + "test('fails on assertion', () => { assert.equal(value(), expected(value())); });\n";
+const helperRun = (t) => run(t, { nodes: [{ id: 'r', writes: ['spec'], redSpecs: [{ file: 'spec/red.test.mjs', name: 'fails on assertion' }] },
+  { id: 'impl', deps: ['r'], reads: ['docs/in.txt'], writes: ['src/impl.mjs'] }],
+  behaviour: { r: { write: { 'spec/red.test.mjs': HSPEC, 'spec/helpers/h.mjs': 'export const expected = () => 2;\n' } }, impl: { write: { 'src/impl.mjs': IMPL_V2 } } } });
+
+test('R1-1 (MAJOR-1) a correction of an OVERLAID test helper invalidates RED (one predicate for drive and succeed); the vacuous RED never ships', { skip: SKIP }, (t) => {
+  const { fx } = helperRun(t);
+  const S0 = shipped(fx);
+  assert.deepEqual(S0.gates.red.r.base_tree.overlay.map(x => x.path), ['spec/helpers/h.mjs', 'spec/red.test.mjs']);
+  writeFileSync(join(fx.repo, 'spec', 'helpers', 'h.mjs'), 'export const expected = (v) => v;\n'); // the spec now passes on the base too
+  const g = succeed(fx, { kind: 'correction', reason: 'helper fix', paths: ['spec/helpers/h.mjs'] });
+  ok(g);
+  assert.deepEqual(g.out.generation.invalidated.red, ['r'], 'the overlaid helper is a RED input');
+  ok(fx.gate('review', passReview('rx2', candidate(fx, stateOf(fx)), { generation: 1 })));
+  refused(fx.gate('ship-ready', {}), 'red_renewal_pending');
+  refused(fx.gate('red', { node: 'r', command: 'unit' }), 'spec_not_failing'); // the corrected test no longer fails on the base: never RED
+});
+
+test('R1-1b (MAJOR-1) a generation re-records only the fingerprints it authorizes: a later unrecorded change is post_freeze_drift again', { skip: SKIP }, (t) => {
+  const { fx, o } = run(t);
+  shipped(fx);
+  baseMoves(fx, o, { 'upstream/f1.txt': 'x\n' });
+  ok(succeed(fx, { kind: 'base', reason: 'rebase' }));
+  ok(fx.gate('red', { node: 'r', command: 'unit' }));
+  ok(fx.gate('review', passReview('rx2', candidate(fx, stateOf(fx)), { generation: 1 })));
+  writeFileSync(join(fx.repo, 'docs', 'in.txt'), 'an unrecorded change of a declared read\n');
+  refused(fx.gate('ship-ready', {}), 'post_freeze_drift');
+});
+
+test('R1-2 (MAJOR-2) gate red killed during a setup step: re-entry refuses runner_alive, spawns no second setup and keeps the lock', { skip: SKIP }, async (t) => {
+  const marks = join(realpathTmp(), `pr4b-marks-${process.pid}-${Date.now()}`); mkdirSync(marks);
+  t.after(() => { for (const f of readdirSync(marks)) if (f.startsWith('m-')) try { process.kill(-Number(f.slice(2)), 'SIGKILL'); } catch { /* gone */ } });
+  const slow = { cmd: process.execPath, args: ['-e', `require('fs').writeFileSync(require('path').join(${JSON.stringify(marks)}, 'm-' + process.pid), ''); setTimeout(() => {}, 30000)`] };
+  const { fx } = run(t, { config: { ...PIN, timeoutMs: 120000, succession: { version: 1 }, redEnvironment: { setup: [slow] } },
+    nodes: [{ id: 'r', writes: ['spec/red.test.mjs'], resources: ['db:main'], redSpecs: [{ file: 'spec/red.test.mjs', name: 'fails on assertion' }] },
+      { id: 'impl', deps: ['r'], writes: ['src/impl.mjs'] }] });
+  ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
+  const inp = join(fx.root, 'red-in.json'); writeFileSync(inp, JSON.stringify({ node: 'r', command: 'unit' }));
+  const c = fx.spawnCli('gate red', { input: inp });
+  const started = () => readdirSync(marks).filter(f => f.startsWith('m-'));
+  for (let i = 0; i < 300 && !started().length; i++) await new Promise(r => setTimeout(r, 100));
+  assert.equal(started().length, 1, 'the setup step started');
+  for (let i = 0; i < 100 && !stateOf(fx).attempts.some(a => a.setup === 0 && a.status === 'running'); i++) await new Promise(r => setTimeout(r, 100));
+  c.kill('SIGKILL'); await new Promise(r => c.on('exit', r));
+  const before = stateOf(fx);
+  const holder = before.locks['db:main'];
+  assert.ok(holder && before.attempts.find(a => a.attempt_id === holder)?.setup === 0, 'the killed setup holds db:main');
+  refused(fx.gate('red', { node: 'r', command: 'unit' }), 'runner_alive');
+  assert.equal(started().length, 1, 'no second setup launched over the live group');
+  const after = stateOf(fx);
+  assert.equal(after.locks['db:main'], holder, 'the live group keeps its lock');
+  assert.equal(after.attempts.filter(a => a.setup === 0).length, 1);
+});
+
+test('R1-3 (MAJOR-3) a generation before the first unit review authorizes nothing later: an unrelated re-review pays the ceiling (parent_ceiling)', { skip: SKIP }, (t) => {
+  const { fx, o } = run(t, { config: { ...SUCCESSION, unitReview: true, unitRecheckCeiling: 1, acceptanceIds: ['AC1'] }, testCommands: { unit: TAP, ok: PASS },
+    nodes: [{ id: 'r', unit: 'u-r', checks: ['ok'], acceptance: ['AC1'], writes: ['spec/red.test.mjs'], redSpecs: [{ file: 'spec/red.test.mjs', name: 'fails on assertion' }] },
+      { id: 'impl', deps: ['r'], unit: 'u-impl', checks: ['ok'], reads: ['docs/in.txt'], writes: ['src/impl.mjs'] }] });
+  const units = () => fx.cli('status').out.units;
+  const review = (u, rx) => { const S = stateOf(fx), ev = units()[u].evidence;
+    const { second_opinion: _s, ...input } = { unit: u, approved_plan_digest: S.plan_digest, dag_digest: S.dag_digest, base_commit: ev.base_commit, ...passReview(rx, ev.id) };
+    return fx.gate('unit-review', input); };
+  ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive')); ok(fx.gate('red', { node: 'r', command: 'unit' })); ok(fx.cli('drive'));
+  if (units()['u-impl'].state !== 'verified') ok(fx.cli('drive'));
+  baseMoves(fx, o, { 'upstream/f1.txt': 'x\n' });
+  ok(succeed(fx, { kind: 'base', reason: 'rebase before any unit review' }));
+  ok(fx.cli('drive'), 're-checks');
+  ok(review('u-impl', 'urx-1'), 'first unit review (free anyway)');
+  assert.equal(stateOf(fx).unit_checks['u-impl'].generation?.rereview ?? false, false, 'a first review consumes the re-review authorization');
+  writeFileSync(join(fx.repo, 'docs', 'in.txt'), 'changed read, unrelated to the generation\n');
+  for (let i = 0; i < 3 && units()['u-impl'].state !== 'verified'; i++) fx.cli('drive');
+  const r = review('u-impl', 'urx-2');
+  assert.equal(r.out?.code, 'parent_ceiling', r.stdout);
+  assert.ok(!stateOf(fx).events.some(e => e.type === 'UNIT_REVIEW_CYCLE' && e.trigger?.cause === 'generation' && e.trigger?.predecessor === 'urx-1'));
+});
+
+test('R1-4 (Codex 4) RED setup and tests run with a scrubbed environment: no GIT_* or module-resolution variable points at the candidate', { skip: SKIP }, (t) => {
+  const dump = { cmd: process.execPath, args: ['-e', "require('fs').writeFileSync(process.env.PR4B_ENV_OUT, JSON.stringify({ env: process.env, cwd: process.cwd() }))"] };
+  const { fx } = run(t, { config: { ...PIN, succession: { version: 1 }, redEnvironment: { setup: [dump] } } });
+  ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
+  const out = join(fx.root, 'env.json'), inp = join(fx.root, 'red-env.json');
+  writeFileSync(inp, JSON.stringify({ node: 'r', command: 'unit' }));
+  writeFileSync(join(fx.root, 'evil.cjs'), ''); // a module the candidate would inject into every node child
+  const env = { ...fx.env, PR4B_ENV_OUT: out, GIT_DIR: join(fx.repo, '.git'), GIT_WORK_TREE: fx.repo, NODE_PATH: join(fx.repo, 'node_modules'),
+    NODE_OPTIONS: `--require ${join(fx.root, 'evil.cjs')}`, npm_config_prefix: fx.repo, INIT_CWD: fx.repo };
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL('./run-engine.mjs', import.meta.url)), 'gate', 'red', '--repo', fx.repo, '--ticket', 'T-1', '--run-id', 'run-1', '--input', inp], { encoding: 'utf8', env, timeout: 60000 });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const seen = JSON.parse(readFileSync(out, 'utf8'));
+  for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'NODE_PATH', 'NODE_OPTIONS', 'npm_config_prefix', 'INIT_CWD']) assert.equal(seen.env[k], undefined, k);
+  assert.ok(!seen.cwd.startsWith(fx.repo), `the setup runs in the base tree, not the candidate: ${seen.cwd}`);
+});
+
+test('R1-5 (Codex 5) the candidate repository\'s filters cannot transform the base tree: a planted smudge filter is not applied, the bytes are the base blobs', { skip: SKIP }, (t) => {
+  const { fx, o } = run(t);
+  ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
+  // a hostile repository configuration that would rewrite the base implementation to v2 on checkout (RED would then pass)
+  o.git('config', 'filter.evil.smudge', `${process.execPath} -e "process.stdin.pipe(require('stream').Transform({transform(c,e,cb){cb(null,String(c).replace('=> 1','=> 2'))}})).pipe(process.stdout)"`);
+  mkdirSync(join(fx.repo, '.git', 'info'), { recursive: true });
+  writeFileSync(join(fx.repo, '.git', 'info', 'attributes'), '*.mjs filter=evil\n');
+  const r = fx.gate('red', { node: 'r', command: 'unit' });
+  ok(r, 'RED fails on the true base bytes');
+  const S = stateOf(fx);
+  assert.equal(S.gates.red.r.base_tree.verified, true, 'the exported bytes were verified against the base blobs');
+  assert.ok(!existsSync(S.gates.red.r.base_tree.dir ?? '/nonexistent'), 'the export is removed after RED');
+  assert.deepEqual(S.succession.red_trees ?? [], [], 'no recorded leftover');
+});
+
+test('R1-6 (m1) the generation-authorized review binds the generation\'s candidate: a change written after succeed needs succeed again', { skip: SKIP }, (t) => {
+  const { fx } = run(t);
+  shipped(fx);
+  chmodSync(join(fx.repo, 'src', 'impl.mjs'), 0o755);
+  ok(succeed(fx, { kind: 'mode', reason: 'exec bit', paths: ['src/impl.mjs'] }));
+  mkdirSync(join(fx.repo, 'other'), { recursive: true }); writeFileSync(join(fx.repo, 'other', 'x.txt'), 'out of scope');
+  refused(fx.gate('review', passReview('rx2', candidate(fx, stateOf(fx)), { generation: 1 })), 'stale_candidate');
+  refused(succeed(fx, { kind: 'correction', reason: 'out of scope', paths: ['other/x.txt'] }), 'succession_out_of_scope');
+});
+const realpathTmp = () => realpathSync(tmpdir());

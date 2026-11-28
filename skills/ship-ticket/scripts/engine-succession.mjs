@@ -7,7 +7,7 @@
  * - "archive the run and start a new one" when the base moves (engine-base-read.mjs pinnedBaseRefusal, engine-identity.mjs
  *   verifyFrozenBase, both through movedRoute): a SUCCESSOR GENERATION recorded in-run by `run-engine.mjs succeed`;
  * - the HEAD fallback of baseRef (engine-dag.mjs): a succession run is always pinned (the DAG refuses it otherwise);
- * - RED re-proved on a hand-reverted tree: RED runs in a detached worktree of the APPROVED BASE plus the approved test-input
+ * - RED re-proved on a hand-reverted tree: RED runs in a verified raw-blob export of the APPROVED BASE plus the approved test-input
  *   overlay, after the DAG-declared environment setup (D-RED, below);
  * - post-freeze drift routed to an owner RETRY: an in-scope correction (F) or a mode-only change is a recorded generation.
  *
@@ -30,14 +30,16 @@
  * binding (base commit, fingerprints): units the generation invalidates get one generation-authorized re-check and unit
  * re-review that spend no run-wide ceiling and count no invalidation storm (engine-units.mjs, engine-unit-review.mjs).
  */
-import { lstatSync, readFileSync, readlinkSync, mkdirSync, rmSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
+import { lstatSync, readFileSync, readlinkSync, mkdirSync, rmSync, writeFileSync, existsSync, realpathSync, mkdtempSync, symlinkSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { reconcileRedRunners } from './gate.mjs';
 import { tmpdir, devNull } from 'node:os';
 import { join, posix } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { coded, note, overlap, isObj, successionOn, clampTimeout, judgment } from './engine-dag.mjs';
-import { underHardenedGit, pinBaseRecord, baseCandidate } from './engine-base-read.mjs';
+import { underHardenedGit, hardenedGitEnv, pinBaseRecord, baseCandidate } from './engine-base-read.mjs';
 import { authGit } from './engine-base.mjs';
-import { invalidateRed } from './engine-attempts.mjs';
+import { invalidateRed, redChanges } from './engine-attempts.mjs';
 import { unitStates, hasUnits } from './engine-units.mjs';
 import { retire, leaderStart } from './engine-quiesce.mjs';
 import { armAttempt } from './lib/deadline.mjs';
@@ -183,33 +185,103 @@ export function redOverlay(root, S, node, specs, commit, changedPaths) {
 }
 
 /**
- * The run's RED base-worktree directory: deterministic per (repository, ticket, run), in the OS temp dir (realpath). NOT under
- * the git common dir: a checkout under <repo>/.git resolves bare imports from <repo>/node_modules (Node walks every ancestor),
- * so the candidate's dependencies would leak into RED on the base (S3 defect 4, Codex D-c). The worktree REGISTRATION lives in
- * the common dir (git worktree add); it is removed on every exit path and a leftover of a crash is removed at the next entry.
+ * The base tree of one RED lives in a fresh `mkdtemp` directory (mode 0700, unpredictable name) in the OS temp dir, NEVER under
+ * the repository or its git common dir: a checkout under <repo>/.git resolves bare imports from <repo>/node_modules (Node walks
+ * every ancestor), so the candidate's dependencies would leak into RED on the base (S3 defect 4, Codex D-c). The placement fails
+ * closed when the temp dir is inside the repository or common dir, or has an ancestor node_modules. The path is recorded in
+ * S.succession.red_trees before anything is written there, removed on every exit path, and a crash leftover is removed at the
+ * next gate red of the run (after the runner reconcile proved no setup group still uses it).
  */
-export function redTreeDir(E) {
-  const key = digest(`${realpathSync(io.commonGitDir(E.ctx.repoRoot))}\0${E.S.ticket}\0${E.S.run_id}`).slice(7, 23);
-  return join(realpathSync(tmpdir()), `ship-ticket-red-base-${key}`);
+function newRedTreeDir(E) {
+  const tmp = realpathSync(tmpdir());
+  const inside = (p, q) => p === q || p.startsWith(q + '/');
+  const repo = realpathSync(E.ctx.repoRoot), common = realpathSync(io.commonGitDir(E.ctx.repoRoot));
+  if (inside(tmp, repo) || inside(tmp, common)) return no('red_base_unsafe', [`the OS temp dir ${tmp} is inside the repository: a base tree there resolves the candidate's node_modules`]);
+  for (let a = tmp; ; a = posix.dirname(a)) {
+    if (existsSync(join(a, 'node_modules'))) return no('red_base_unsafe', [`${join(a, 'node_modules')} is an ancestor of the OS temp dir: bare imports of RED would resolve there`]);
+    if (a === posix.dirname(a)) break;
+  }
+  return { ok: true, dir: mkdtempSync(join(tmp, 'ship-ticket-red-base-')) };
 }
 
-/** Remove the base worktree `dir` (its registration, then its files) and prune stale registrations. Never throws. */
-export function removeRedTree(root, dir) {
-  try { git(root, ['worktree', 'remove', '--force', '--force', dir]); } catch { /* not registered */ }
-  rmSync(dir, { recursive: true, force: true });
-  try { git(root, ['worktree', 'prune']); } catch { /* best effort: a stale registration whose dir is gone is pruned later */ }
+/** Remove a base tree directory. Never throws (a failure is recorded as a leftover the next entry removes). */
+export function removeRedTree(dir) {
+  try { rmSync(dir, { recursive: true, force: true }); return true; } catch { return false; }
 }
+/** Forget a removed base tree in the state (called by the RED gate on the state it commits). */
+export function forgetRedTree(S, dir) {
+  if (!S.succession?.red_trees) return;
+  S.succession.red_trees = S.succession.red_trees.filter(p => p !== dir || existsSync(p));
+}
+
+/**
+ * The git environment of the base export: hardened (no GIT_* variable, no replace refs, no grafts) and with no global or system
+ * configuration. Repository config still exists, so the export never runs a filter: blobs are read raw (`cat-file --batch`).
+ */
+const exportEnv = () => ({ ...hardenedGitEnv(process.env), GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_SYSTEM: devNull, GIT_CONFIG_NOSYSTEM: '1', GIT_ATTR_NOSYSTEM: '1' });
+const ISOLATED = ['-c', `core.hooksPath=${devNull}`, '-c', `core.attributesFile=${devNull}`, '-c', 'core.fsmonitor=false'];
+
+/**
+ * Write the tree of `commit` into `dir` from raw blobs (no checkout, so no smudge filter, attribute, hook or config of the
+ * candidate repository transforms a byte), then verify every written file against its blob id (`hash-object --no-filters`).
+ * Gitlinks become empty directories. Throws red_base_unavailable / red_base_unverified.
+ */
+function exportBaseTree(root, commit, dir) {
+  const env = exportEnv(), run = (args, opts = {}) => authGit(root, [...ISOLATED, ...args], { env, maxBuffer: 1024 * 1024 * 1024, ...opts });
+  const ls = run(['ls-tree', '-r', '-z', '--full-tree', commit]);
+  if (ls.status !== 0) throw coded('red_base_unavailable', `git ls-tree ${commit}: ${ls.stderr.trim()}`);
+  const entries = ls.stdout.split('\0').filter(Boolean).map(l => { const m = l.match(/^(\d{6}) (\w+) ([0-9a-f]+)\t([\s\S]+)$/); if (!m) throw coded('red_base_unavailable', `unparseable ls-tree entry ${JSON.stringify(l)}`); return { mode: m[1], type: m[2], oid: m[3], path: m[4] }; });
+  const blobs = entries.filter(e => e.type === 'blob');
+  const cat = spawnSync('git', ['--no-replace-objects', ...ISOLATED, 'cat-file', '--batch'], { cwd: root, env, input: blobs.map(e => e.oid).join('\n') + '\n', maxBuffer: 1024 * 1024 * 1024 });
+  if (cat.status !== 0) throw coded('red_base_unavailable', `git cat-file --batch: ${String(cat.stderr).trim()}`);
+  let at = 0;
+  const out = cat.stdout, files = [];
+  for (const e of blobs) {
+    const nl = out.indexOf(10, at), head = out.subarray(at, nl).toString('utf8').split(' ');
+    if (head[0] !== e.oid || head[1] !== 'blob') throw coded('red_base_unavailable', `cat-file returned ${head.join(' ')} for ${e.oid}`);
+    const size = Number(head[2]), bytes = out.subarray(nl + 1, nl + 1 + size);
+    at = nl + 1 + size + 1;
+    const abs = join(dir, e.path);
+    if (e.path.split('/').some(x => x === '..' || x === '.git') || posix.isAbsolute(e.path)) throw coded('red_base_unavailable', `refused tree path ${e.path}`);
+    mkdirSync(posix.dirname(abs), { recursive: true });
+    if (e.mode === '120000') symlinkSync(bytes.toString('utf8'), abs);
+    else { writeFileSync(abs, bytes, { mode: e.mode === '100755' ? 0o755 : 0o644 }); files.push(e); }
+  }
+  for (const e of entries.filter(x => x.type === 'commit')) mkdirSync(join(dir, e.path), { recursive: true });
+  // verification: every regular file hashes (no filters) to its base blob id; every symlink names its blob's target
+  if (files.length) {
+    const h = spawnSync('git', ['--no-replace-objects', ...ISOLATED, 'hash-object', '--no-filters', '--stdin-paths'], { cwd: root, env, input: files.map(e => join(dir, e.path)).join('\n') + '\n', encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    const got = h.status === 0 ? h.stdout.trim().split('\n') : [];
+    const bad = files.filter((e, i) => got[i] !== e.oid).map(e => e.path);
+    if (h.status !== 0 || bad.length) throw coded('red_base_unverified', `the exported base tree does not match the base blobs: ${h.status !== 0 ? String(h.stderr).trim() : bad.slice(0, 5).join(', ')}`);
+  }
+  for (const e of entries.filter(x => x.mode === '120000')) {
+    const cat1 = authGit(root, [...ISOLATED, 'cat-file', 'blob', e.oid], { env });
+    if (cat1.status !== 0 || readlinkSync(join(dir, e.path)) !== cat1.stdout) throw coded('red_base_unverified', `symlink ${e.path} does not match its base blob`);
+  }
+  return entries.length;
+}
+
+/**
+ * The environment of RED setup steps and the RED command in the base tree: the hardened git environment (no GIT_* variable
+ * pointing at the candidate repository: engine-base-read.mjs hardenedGitEnv) without the module-resolution and package-manager
+ * variables that would point Node or npm back at the candidate (NODE_PATH, NODE_OPTIONS, npm_config_*, INIT_CWD, PWD, OLDPWD).
+ */
+const CANDIDATE_DIRECTED = /^(NODE_PATH|NODE_OPTIONS|NODE_REPL_EXTERNAL_MODULE|INIT_CWD|PWD|OLDPWD|npm_config_.*|npm_package_.*|npm_lifecycle_.*)$/i;
+export const redRunEnv = (env) => Object.fromEntries(Object.entries(hardenedGitEnv(env)).filter(([k]) => !CANDIDATE_DIRECTED.test(k)));
 
 /** The declared environment's identity (what RED evidence binds): the digest of config.redEnvironment. */
 export const environmentDigest = (S) => digest(JSON.stringify(S.config.redEnvironment ?? null));
 
 /**
- * Prepare RED of `node` on the approved base `commit`: the overlay, the declared environment, a fresh detached worktree of the
- * base (hooks off), the overlay bytes, then each declared setup step under the runner protocol (attempt kind gate-red with
- * `setup`, the node's resources locked, a persisted deadline, retire() before it counts; it runs inside `gate red`, a heavy
- * engine command claimed at the process boundary, engine-host-claim.mjs HEAVY_GATES); `depsFor(dir)` gives the runner deps
- * rooted at the worktree. -> { ok: true, tree } | a refusal (the
- * worktree is already removed). Never falls back to the work tree.
+ * Prepare RED of `node` on the approved base `commit`, the ONE owner of the base tree's lifecycle: the overlay, the declared
+ * environment, then the runner protocol's pre-launch reconcile FIRST (gate.mjs reconcileRedRunners: a live setup or RED group of
+ * the node, or a live holder of its resources, refuses before anything is deleted or launched), the removal of recorded
+ * leftovers, a fresh verified export of the base, the overlay bytes, then each declared setup step under the runner protocol
+ * (attempt kind gate-red with `setup`, the node's resources locked, a persisted deadline, retire() before it counts; it runs
+ * inside `gate red`, a heavy engine command claimed at the process boundary, engine-host-claim.mjs HEAVY_GATES). `depsFor(dir)`
+ * gives the runner deps rooted at the tree (scrubbed environment). -> { ok: true, tree } | a refusal (the tree is already
+ * removed). Never falls back to the work tree.
  */
 export async function prepareRedTree(E, node, specs, commit, depsFor) {
   const root = E.ctx.repoRoot, S = E.S;
@@ -220,31 +292,39 @@ export async function prepareRedTree(E, node, specs, commit, depsFor) {
   const env = S.config.redEnvironment;
   if (env === undefined) return no('red_baseline_missing', ['no declared RED environment (config.redEnvironment { setup }): RED on the approved base cannot be prepared, '
     + 'and the checkout\'s dependencies are never linked (an unchanged lockfile is no permission); RED is Blocked until the approved DAG declares it']);
-  const dir = redTreeDir(E);
-  removeRedTree(root, dir); // a leftover of an interrupted gate red
-  const add = git(root, ['-c', `core.hooksPath=${devNull}`, 'worktree', 'add', '--detach', '--force', dir, commit]);
-  if (add.status !== 0) { removeRedTree(root, dir); return no('red_base_unavailable', [`git worktree add --detach ${commit}: ${add.stderr.trim()}`]); }
+  const busy = await reconcileRedRunners(S, { node: node.id, resources: node.resources, isGroupAlive: E.alive, platform: E.ctx.platform ?? process.platform });
+  if (busy) { await E.commit(); const { state: _s, ...refusal } = busy; return refusal; }
+  S.succession.red_trees = (S.succession.red_trees ?? []).filter(p => !removeRedTree(p)); // leftovers of an interrupted gate red
+  const made = newRedTreeDir(E);
+  if (!made.ok) { await E.commit(); return made; }
+  const dir = made.dir;
+  S.succession.red_trees.push(dir);
+  await E.commit();
+  const fail = async (r) => { if (removeRedTree(dir)) forgetRedTree(E.S, dir); await E.commit(); return r; };
   try {
+    exportBaseTree(root, commit, dir);
     const placed = [];
     for (const { path, from } of o.overlay) {
       const bytes = readFileSync(join(root, from));
       mkdirSync(join(dir, posix.dirname(path)), { recursive: true });
       writeFileSync(join(dir, path), bytes);
-      placed.push({ path, from, digest: digest(bytes) });
+      placed.push({ path, from, digest: io.repoFileDigest(root, from) });
     }
     const steps = [];
     for (const [i, s] of env.setup.entries()) {
       const r = await setupStep(E, node, s, i, depsFor(dir));
-      if (r.refusal) { removeRedTree(root, dir); return r.refusal; }
+      if (r.refusal) return fail(r.refusal);
       steps.push(r.step);
     }
-    return { ok: true, tree: { dir, commit, overlay: placed, environment: { digest: environmentDigest(S), steps } } };
-  } catch (e) { removeRedTree(root, dir); return no(e.code ?? 'red_base_unavailable', [e.message]); }
+    return { ok: true, tree: { dir, commit, verified: true, overlay: placed, environment: { digest: environmentDigest(S), steps } } };
+  } catch (e) { return fail(no(e.code ?? 'red_base_unavailable', [e.message])); }
 }
 
 async function setupStep(E, node, s, i, deps) {
   const S = E.S, timeoutMs = clampTimeout(S.config.timeoutMs);
   const a = { attempt_id: 'att-' + randomUUID(), kind: 'gate-red', node: node.id, setup: i, status: 'intent', resources: [...node.resources], started_at: new Date().toISOString() };
+  const held = node.resources.filter(r => S.locks[r] !== undefined);
+  if (held.length) return { refusal: no('resource_locked', held.map(r => `${r} is held by ${S.locks[r]}`)) }; // never overwrite a holder
   S.attempts.push(a);
   for (const r of node.resources) S.locks[r] = a.attempt_id;
   await E.commit();
@@ -300,10 +380,12 @@ export const retainedRef = (S, g) => `refs/ship-ticket/succession/${digest(`${S.
 function retain(root, T) {
   if (!T.old_head) return { preserved: false, reason: 'no predecessor head was recorded' };
   if (git(root, ['cat-file', '-e', `${T.old_head}^{commit}`]).status !== 0) return { preserved: false, reason: `the predecessor head ${T.old_head} is no longer in the object store` };
-  const r = git(root, ['update-ref', '-m', `ship-ticket succession: retain the predecessor of generation ${T.g}`, T.retained_ref, T.old_head, '']);
+  const r = git(root, ['-c', `core.hooksPath=${devNull}`, '-c', 'core.fsync=reference', '-c', 'core.fsyncMethod=fsync', 'update-ref', '-m', `ship-ticket succession: retain the predecessor of generation ${T.g}`, T.retained_ref, T.old_head, '']);
   if (r.status === 0) return { preserved: true };
   const now = git(root, ['rev-parse', '--verify', '--quiet', T.retained_ref]);
   if (now.status === 0 && now.stdout.trim() === T.old_head) return { preserved: true };
+  const lock = `${realpathSync(io.commonGitDir(root))}/${T.retained_ref}.lock`;
+  if (existsSync(lock)) return no('retained_ref_locked', [`${lock} exists (an interrupted git update-ref): once no git process runs, remove it and run succeed again`]);
   return no('retained_ref_conflict', [`${T.retained_ref} exists and names ${now.stdout.trim() || '(unreadable)'}, not the predecessor ${T.old_head}: nothing is overwritten`]);
 }
 
@@ -409,8 +491,10 @@ function rebindUnits(E, N, g) {
   const after = unitStates(N, E.ctx.repoRoot, {});
   const out = [];
   for (const [u, s] of Object.entries(after)) {
-    if (s.state !== 'stale' || !N.unit_checks[u].evidence) continue;
-    N.unit_checks[u].generation = { g, recheck: true, rereview: true, storm: true };
+    const rec = N.unit_checks[u];
+    if (s.state !== 'stale' || !rec.evidence) continue;
+    // bound to the evidence this generation invalidates, consumed once for it; no storm credit for a unit already stale
+    rec.generation = { g, evidence: rec.evidence.id, recheck: true, rereview: true, storm: !rec.stale };
     out.push(u);
   }
   return out;
@@ -473,10 +557,12 @@ export async function succeed(E, input, { mode = 'commit', beforeCommit } = {}) 
   // Build the successor on a clone; E.S (and the state on disk) is untouched until the one commit below
   const X = { ...E, S: structuredClone(E.S) }, N = X.S;
   const redNodes = Object.keys(N.gates.red ?? {}).filter(d => N.gates.red[d]);
-  const invalidRed = t.kind === 'base' ? redNodes
-    : redNodes.filter(d => Object.keys(N.gates.red[d].spec_digests ?? {}).some(f => t.candidate_delta.some(x => x.path === f)));
+  // ONE predicate (engine-attempts.mjs redChanges, the one a drive uses): spec bytes, the overlaid test inputs RED executed, and
+  // the base; evaluated against the successor (its base)
   X.baseCommit = t.new_base;
-  for (const d of invalidRed) invalidateRed(X, d, { changed: t.kind === 'base' ? [] : Object.keys(N.gates.red[d].spec_digests).filter(f => t.candidate_delta.some(x => x.path === f)), moved: t.kind === 'base' });
+  const why = Object.fromEntries(redNodes.map(d => [d, redChanges(X, N.gates.red[d])]).filter(([, w]) => w));
+  const invalidRed = Object.keys(why);
+  for (const d of invalidRed) invalidateRed(X, d, why[d]);
   const addenda = t.kind === 'base' ? Object.keys(N.gates.red_addendum ?? {}) : [];
   for (const k of addenda) delete N.gates.red_addendum[k];
   const new_head = headOid(E.ctx.repoRoot);
@@ -494,8 +580,13 @@ export async function succeed(E, input, { mode = 'commit', beforeCommit } = {}) 
   if (t.kind === 'base') N.base = { ...N.base, sha: t.pin.sha, merge_base: t.new_base, pinned_at_seq: (N.seq ?? 0) + 1 };
   if (review_required) N.freeze = null;
   if (t.kind !== 'base') for (const r of N.repairs) if (r.state === 'failed') { r.state = 'cancelled'; r.reason = `superseded by generation ${t.g}`; }
-  // the done nodes' fingerprints are re-recorded: the change is recorded here, not reported again as post-freeze drift
-  for (const n of Object.values(N.nodes)) if (n.state === 'done' && n.fps) n.fps = io.fingerprints(E.ctx.repoRoot, Object.keys(n.fps));
+  // only what this generation authorizes is re-recorded (the recorded candidate delta and the base delta): any other change of
+  // a done node's inputs or outputs stays post_freeze_drift, as on a run without succession
+  const authorized = [...t.candidate_delta.map(d => d.path), ...t.entries.map(e => e.path)];
+  for (const n of Object.values(N.nodes)) if (n.state === 'done' && n.fps) {
+    const keys = Object.keys(n.fps).filter(k => authorized.some(p => overlap(p, k)));
+    if (keys.length) n.fps = { ...n.fps, ...io.fingerprints(E.ctx.repoRoot, keys) };
+  }
   const units = rebindUnits(E, N, t.g);
   gen.invalidated.units = units;
   gen.renewal_required.units = units;
@@ -523,13 +614,15 @@ export const currentGeneration = (S) => (S.succession?.generations ?? []).at(-1)
  * without a RETRY exactly once per generation that requires a review. -> null (no generation claim), { ok: true, g } or a
  * refusal. Never writes an authority event.
  */
-export function generationReview(S, input) {
+export function generationReview(S, input, candidate) {
   if (input.generation === undefined) return null;
   if (!(Number.isInteger(input.generation) && input.generation > 0)) return no('bad_input', ['generation names a succession generation (a positive integer)']);
   const gen = currentGeneration(S);
   if (!gen || input.generation !== gen.g) return no('generation_mismatch', [`the review names generation ${input.generation}; the current generation is ${gen?.g ?? 'none'}`]);
   if (input.kind !== 'original') return no('generation_mismatch', ['a generation authorizes one fresh original review']);
   if (!gen.review_required) return no('generation_mismatch', [`generation ${gen.g} opened no review (there was none to renew)`]);
+  if (candidate !== gen.new.candidate) return no('stale_candidate', [`the work tree is ${candidate}, generation ${gen.g} recorded ${gen.new.candidate}: `
+    + 'a change made after succeed is recorded by succeed again (its scope check applies) before the generation review']);
   if (gen.renewed.review) return no('retry_unauthorized', [`generation ${gen.g} already authorized review ${gen.renewed.review}: a further original needs a RETRY`]);
   return { ok: true, g: gen.g };
 }

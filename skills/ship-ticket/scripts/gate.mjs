@@ -260,6 +260,36 @@ export function specResults(specs, runs, opts) {
 const refuse = (state, code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, degraded: false, reasons, state, ...extra });
 
 /**
+ * The runner protocol's pre-launch reconcile for RED of `node` holding `resources` (the ONE owner; gateRed and the PR-4b base
+ * tree setup call it before they launch anything): a live gate-red attempt of the node -> runner_alive; a live holder of a
+ * resource -> resource_locked; an unknowable group -> quiescence_unknown; a proven-gone one is retired (its locks released);
+ * a lock still held afterwards -> resource_locked. Mutates `state` (retire) and returns a refusal, or null to launch.
+ */
+export async function reconcileRedRunners(state, { node, resources = [], isGroupAlive, platform }) {
+  for (const a of state.attempts) {
+    if (a.envelope || a.status === 'exited' || a.status === 'abandoned') continue;
+    const relevant = (a.kind === 'gate-red' && a.node === node) || (a.resources ?? []).some((r) => resources.includes(r));
+    if (!relevant) continue;
+    const alive = a.pgid === undefined ? false : isGroupAlive(a.pgid);
+    if (alive === null) {
+      return refuse(state, 'quiescence_unknown', [`cannot tell whether process group ${a.pgid} of ${a.attempt_id} has exited (${platform})`], { judgment_point: true });
+    }
+    if (alive) {
+      if (a.kind === 'gate-red' && a.node === node) return refuse(state, 'runner_alive', [`runner ${a.attempt_id} (pgid ${a.pgid}) is still running`]);
+      return refuse(state, 'resource_locked', [`${a.attempt_id} is live and holds ${(a.resources ?? []).filter((r) => resources.includes(r)).join(', ')}`]);
+    }
+    // A worker keeps its status for the engine's own reconcile; only its locks are reclaimed.
+    if (!(await retire(state, a, isGroupAlive, a.kind === 'gate-red' ? 'abandoned' : null))) {
+      return refuse(state, 'quiescence_unknown', [`cannot prove process group ${a.pgid} of ${a.attempt_id} has exited`], { judgment_point: true });
+    }
+  }
+  const held = resources.filter((r) => state.locks[r] !== undefined);
+  if (held.length) return refuse(state, 'resource_locked', held.map((r) => `${r} is held by ${state.locks[r]}`));
+
+  return null;
+}
+
+/**
  * Run the RED command under the durable attempt protocol and accept RED only
  * when every named spec fails with an assertion. See gate.test.mjs for `deps`.
  * Attempts left at `intent` (no pgid) were never released by their launcher, so
@@ -287,26 +317,9 @@ export async function gateRed(input, deps) {
     return refuse(state, 'dispatched_before_red', [`${early.node} was dispatched at seq ${early.seq} before RED was accepted`], { judgment_point: true });
   }
 
-  // Reconcile earlier attempts with no envelope on their process group.
-  for (const a of state.attempts) {
-    if (a.envelope || a.status === 'exited' || a.status === 'abandoned') continue;
-    const relevant = (a.kind === 'gate-red' && a.node === node) || (a.resources ?? []).some((r) => resources.includes(r));
-    if (!relevant) continue;
-    const alive = a.pgid === undefined ? false : deps.isGroupAlive(a.pgid);
-    if (alive === null) {
-      return refuse(state, 'quiescence_unknown', [`cannot tell whether process group ${a.pgid} of ${a.attempt_id} has exited (${deps.platform})`], { judgment_point: true });
-    }
-    if (alive) {
-      if (a.kind === 'gate-red' && a.node === node) return refuse(state, 'runner_alive', [`runner ${a.attempt_id} (pgid ${a.pgid}) is still running`]);
-      return refuse(state, 'resource_locked', [`${a.attempt_id} is live and holds ${(a.resources ?? []).filter((r) => resources.includes(r)).join(', ')}`]);
-    }
-    // A worker keeps its status for the engine's own reconcile; only its locks are reclaimed.
-    if (!(await retire(state, a, deps.isGroupAlive, a.kind === 'gate-red' ? 'abandoned' : null))) {
-      return refuse(state, 'quiescence_unknown', [`cannot prove process group ${a.pgid} of ${a.attempt_id} has exited`], { judgment_point: true });
-    }
-  }
-  const held = resources.filter((r) => state.locks[r] !== undefined);
-  if (held.length) return refuse(state, 'resource_locked', held.map((r) => `${r} is held by ${state.locks[r]}`));
+  // Reconcile earlier attempts with no envelope on their process group (one owner: reconcileRedRunners).
+  const busy = await reconcileRedRunners(state, { node, resources, isGroupAlive: deps.isGroupAlive, platform: deps.platform });
+  if (busy) return busy;
 
   // Durable attempt protocol: intent -> spawn -> pid/pgid -> release -> envelope.
   const attempt = { attempt_id: deps.newAttemptId(), kind: 'gate-red', node, status: 'intent', resources: [...resources] };
