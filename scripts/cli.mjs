@@ -1668,6 +1668,9 @@ const RETIRED_VOCABULARY = [
   [/\bbuild sequence\b/gi, 'ship-ticket uses an execution DAG whose table order does not serialize ready nodes', ['ship-ticket']],
   [/\bGATE [12]\b/g, 'there was never a GATE 1 or GATE 2', null],
   [/Claude Code\'s built-in review/g, '/code-review belongs to the CodeRabbit plugin; a fresh reviewer subagent is the independent route', null],
+  // D9 (owner decision 2026-11-28): token usage is passive telemetry and never gates anything.
+  [/\bbudget_stop\b|\bstop_dispatch\b|\bbudget_unenforceable\b/g, 'D9: token usage never gates anything; there is no token-budget stop, state or flag', ['ship-ticket']],
+  [/\bspent[- ]budget\b|\b(?:approved |token )?budget is spent\b|\btoken (?:budget )?ceiling\b|`?config\.budget`? headroom/gi, 'D9: config.budget is a passive estimate, never a ceiling, stop or owner class', ['ship-ticket']],
 ];
 
 function cmdHelp() {

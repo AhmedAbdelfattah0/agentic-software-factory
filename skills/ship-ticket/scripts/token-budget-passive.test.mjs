@@ -26,8 +26,14 @@ const ok = (r, msg) => assert.equal(r.status, 0, `${msg ?? ''} ${r.stdout}${r.st
 const usageRow = (id, tokens, over = {}) => JSON.stringify({ provider: 'claude', run_id: 'run-1', role: 'orchestrator', source: 'session',
   source_execution_id: id, input_tokens: tokens, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, ...over });
 const importUsage = (fx, ...rows) => { mkdirSync(dirname(fx.usageFile()), { recursive: true }); writeFileSync(fx.usageFile(), rows.join('\n') + '\n'); };
-/** Every judgment, status field or blocker a reader could take as a token alert. */
+/** Every judgment a reader could take as a token alert. */
 const tokenSignals = (out) => codes(out).filter(c => /budget|token/i.test(c));
+/** The engine's recorded event types: dispatches happened, and none is a token-budget event of any kind. */
+function eventsOk(fx) {
+  const types = fx.readState().events.map(e => e.type);
+  assert.ok(types.includes('DISPATCH'), JSON.stringify(types));
+  assert.deepEqual(types.filter(t => /budget|token/i.test(t)), []);
+}
 
 // ------------------------------------------------------------------ (a) behaviour
 
@@ -41,6 +47,7 @@ test('D9 (a) ticket: usage at 1,100% of the ticket estimate still dispatches the
   assert.equal(fx.readState().nodes.a.state, 'done');
   assert.deepEqual(tokenSignals(r.out), []);
   assert.deepEqual(r.out.judgments, []);
+  eventsOk(fx);
 });
 
 test('D9 (a) phase: a BUILD phase far over its phase estimate dispatches every node (the SCRUM-257 shape)', { skip: WIN_SKIP }, (t) => {
@@ -55,6 +62,7 @@ test('D9 (a) phase: a BUILD phase far over its phase estimate dispatches every n
   assert.deepEqual([fx.runs('a').length, fx.runs('b').length], [1, 1], 'both BUILD nodes ran');
   assert.deepEqual(Object.values(fx.readState().nodes).map(n => n.state), ['done', 'done']);
   assert.deepEqual(tokenSignals(r.out), []);
+  eventsOk(fx);
 });
 
 test('D9 (a) repair: a review repair dispatches with REVIEW usage 200% over the ticket estimate; its round is counted', { skip: WIN_SKIP }, (t) => {
@@ -68,6 +76,7 @@ test('D9 (a) repair: a review repair dispatches with REVIEW usage 200% over the 
   assert.equal(fx.runs('fix').length, 1, 'the finding-bound repair was dispatched');
   assert.equal(r.out.rounds.review_repairs['rx-1'], 1, 'the bounded repair round (a non-token safeguard) still counts');
   assert.deepEqual(tokenSignals(r.out), []);
+  eventsOk(fx);
 });
 
 // ------------------------------------------------------------------ (c) telemetry
@@ -143,14 +152,24 @@ test('D9 (b) guard: policy docs say tokens never gate anything, and no judgment 
   const all = rows.flatMap(([c]) => c);
   for (const c of ['round_limit', 'run_mismatch', 'ownership_violation', 'quiescence_unknown']) assert.ok(all.includes(c), c);
   assert.deepEqual(all.filter(c => /budget|token/.test(c)), []);
+  assert.ok(harness.indexOf('**Judgment points**') >= 0 && harness.indexOf('**Token telemetry.**') > harness.indexOf('**Judgment points**'));
   const list = harness.slice(harness.indexOf('**Judgment points**'), harness.indexOf('**Token telemetry.**'));
   assert.match(list, /`round_limit`/);
   assert.doesNotMatch(list, /budget/);
   const NEVER = /Token usage never gates anything/;
+  const OLD = /budget_stop|stop_dispatch|budget_unenforceable|config\.budget[^.\n]{0,80}mandatory|budget is spent|spent[- ]budget|budget headroom|`config\.budget` headroom|token (?:budget )?ceiling|ticket budget only/i;
   const docs = { harness, skill: readFileSync(join(SKILL, 'SKILL.md'), 'utf8'), plan: readFileSync(join(SKILL, 'references', 'plan.md'), 'utf8'),
     adaptive: readFileSync(join(REPO, 'docs', 'adaptive-execution.md'), 'utf8'), limits: readFileSync(join(REPO, 'docs', 'engine-guarantees-and-limits.md'), 'utf8') };
   for (const [name, text] of Object.entries(docs)) {
     assert.match(text, NEVER, name);
-    assert.doesNotMatch(text, /budget_stop|stop_dispatch|budget_unenforceable|config\.budget[^.\n]{0,80}mandatory|budget is spent|spent budget|budget headroom|`config\.budget` headroom/i, name);
+    assert.doesNotMatch(text, OLD, name);
   }
+  // Every other doc that carried a token stop, owner class or mandatory ceiling: it is gone, and the non-token limits stay.
+  const others = [join(SKILL, 'references', 'review.md'), join(SKILL, 'references', 'prove.md'), join(SKILL, 'references', 'sprint.md'),
+    join(REPO, 'docs', 'lifecycle.md'), join(REPO, 'AGENTS.md'), join(REPO, 'README.md'), join(REPO, 'docs', 'sprint-and-extended-run.md'),
+    join(SKILL, 'references', 'harness-internals.md'), join(SKILL, 'references', 'observability.md')];
+  for (const f of others) assert.doesNotMatch(readFileSync(f, 'utf8'), OLD, f);
+  assert.match(readFileSync(join(SKILL, 'references', 'review.md'), 'utf8'), /when the second-reviewer cap is spent/);
+  assert.match(readFileSync(join(SKILL, 'references', 'prove.md'), 'utf8'), /at the 6-round backstop; token usage never stops it/);
+  assert.match(readFileSync(join(SKILL, 'references', 'sprint.md'), 'utf8'), /So do a security, approval or ownership class,/);
 });
