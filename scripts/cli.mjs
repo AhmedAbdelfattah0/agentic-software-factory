@@ -1670,6 +1670,7 @@ const RETIRED_VOCABULARY = [
   [/Claude Code\'s built-in review/g, '/code-review belongs to the CodeRabbit plugin; a fresh reviewer subagent is the independent route', null],
   // D9 (owner decision 2026-11-28): token usage is passive telemetry and never gates anything.
   [/\bbudget_stop\b|\bstop_dispatch\b|\bbudget_unenforceable\b/g, 'D9: token usage never gates anything; there is no token-budget stop, state or flag', ['ship-ticket']],
+  [/\bToken budget comes first\b|\bcapped by cost\b|\brequest to save tokens\b/gi, 'D9: token cost never decides concurrency, routing or redundancy', ['ship-ticket']],
   [/\bspent[- ]budget\b|\b(?:approved |token )?budget is spent\b|\btoken (?:budget )?ceiling\b|`?config\.budget`? headroom/gi, 'D9: config.budget is a passive estimate, never a ceiling, stop or owner class', ['ship-ticket']],
 ];
 

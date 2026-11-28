@@ -172,4 +172,7 @@ test('D9 (b) guard: policy docs say tokens never gate anything, and no judgment 
   assert.match(readFileSync(join(SKILL, 'references', 'review.md'), 'utf8'), /when the second-reviewer cap is spent/);
   assert.match(readFileSync(join(SKILL, 'references', 'prove.md'), 'utf8'), /at the 6-round backstop; token usage never stops it/);
   assert.match(readFileSync(join(SKILL, 'references', 'sprint.md'), 'utf8'), /So do a security, approval or ownership class,/);
+  // Routing and concurrency: no rule lets token cost decide width, routing or redundancy.
+  assert.match(docs.skill, /\*\*Models and concurrency\.\*\* Token usage never gates anything: concurrency is\s+governed by host resource admission, ownership and dependencies, never by token cost/);
+  assert.doesNotMatch(docs.skill, /Token budget comes first|capped by cost|request to save tokens|dominate cost|Keep review cheap|costs less than a\s+cheap one/);
 });

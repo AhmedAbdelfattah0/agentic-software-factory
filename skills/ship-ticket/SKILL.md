@@ -657,8 +657,8 @@ when triggered and frozen runtime evidence when trust boundaries are triggered.
 It does not repeat deterministic commands or attacks unless a repair invalidates
 their inputs.
 
-**Token budget comes first.** Concurrency is capped by cost, not only by
-dependencies:
+**Models and concurrency.** Token usage never gates anything: concurrency is
+governed by host resource admission, ownership and dependencies, never by token cost:
 
 - **Model.** Set `model` on every subagent call:
   - `haiku` for lookups, survey sweeps, status checks and screenshot capture;
@@ -666,8 +666,8 @@ dependencies:
   - `opus` for the one primary review (code review and the UI-parity grade
     together) and for designing money, auth or security logic. A Sonnet primary
     reviewer missed design and validation defects that a later Opus pass caught
-    (product tickets TICKET-F and TICKET-G, 2026-11-05); one strong review costs less than a
-    cheap one plus a fix ticket on merged code;
+    (product tickets TICKET-F and TICKET-G, 2026-11-05), so the primary review is
+    always strong;
   - `fable` for the fresh second-opinion session when Codex is unavailable
     ([references/cross-model.md](references/cross-model.md)).
 
@@ -681,16 +681,16 @@ dependencies:
   risk classification alone never skips it. `SKIPPED` needs an explicit owner
   exception frozen in the plan ([references/cross-model.md](references/cross-model.md)
   "PLAN debate"). The REVIEW second opinion is never skipped (see REVIEW).
-- **Owner budget.** A human request to save tokens overrides this skill's
-  parallelism and redundancy defaults.
+- **Owner instructions.** An explicit human instruction on parallelism or
+  redundancy overrides this skill's defaults.
 - **Fresh orchestrator per ticket or wave.** Start each ticket or wave in a
   fresh session and hand over through the plan file and its RUN-STATE, which
   hold the state. A wave the human hands over together runs in one session,
   in parallel or stacked as the work allows; never refuse or split a requested
   wave citing this rule. Compact between tickets of a wave when the context
   has grown. What to avoid is unrelated work (other waves, skill changes,
-  deploys, long side discussions) in the same orchestrator session: cache
-  reads of the growing context dominate cost.
+  deploys, long side discussions) in the same orchestrator session: the plan
+  file and RUN-STATE, not a long mixed context, carry the hand-over.
 - **Orchestrator tier.** Mechanical orchestration (dispatching, logging, gates,
   git, tracker) runs on the economy or balanced tier (for example Sonnet as the
   session model). Planning, review and reconciliation run as `strong` (Opus)
@@ -719,7 +719,7 @@ dependencies:
   machinery; (d) record RED evidence per spec (`redSpecs` and `redEvidence` in
   the dispatch).
 
-**Keep review cheap.** These rules apply to every ticket, and to multi-ticket
+**Keep review focused.** These rules apply to every ticket, and to multi-ticket
 waves especially:
 
 - **One reviewer.** When REVIEW does not partition a material full-stack diff,
