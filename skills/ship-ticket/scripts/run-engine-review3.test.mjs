@@ -31,7 +31,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
-import { join, dirname, relative } from 'node:path';
+import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { init, drive, gate } from './run-engine.mjs';
 import { POSIX, fixture, codes, runStateEvents, waitUntil, passReview, failReview, confirmReview,
@@ -260,15 +260,14 @@ test('F10 ship-ready refuses a live attempt left by a crashed engine and an open
   assert.ok(o.out.reasons.includes('repairs_open'), o.stdout);
 });
 
-test('F11 phase_tokens are enforced for a REPAIR dispatch with imported REPAIR-phase usage', { skip: WIN_SKIP }, async (t) => {
+test('F11 (D9) a REPAIR dispatch with imported REPAIR-phase usage over its phase estimate still dispatches', { skip: WIN_SKIP }, async (t) => {
   const fx = failed(t, { config: { budget: { phase_tokens: 50 } } });
   mkdirSync(dirname(fx.usageFile()), { recursive: true });
   writeFileSync(fx.usageFile(), JSON.stringify({ provider: 'claude', run_id: 'run-1', role: 'repair', source: 'session', phase: 'REPAIR',
     source_execution_id: 's:1', input_tokens: 60, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 }) + '\n');
   const r = fx.cli('drive');
-  assert.equal(r.status, 2, r.stdout + r.stderr);
-  assert.ok(r.out.judgments.some(j => j.code === 'budget_stop' && /REPAIR phase/.test(j.reason)), JSON.stringify(r.out.judgments));
-  assert.equal(fx.runs('fix').length, 0);
+  assert.ok(!r.out.judgments.some(j => /budget|token/.test(j.code)), JSON.stringify(r.out.judgments));
+  assert.equal(fx.runs('fix').length, 1, 'REPAIR at 120% of its estimate: the repair ran');
 });
 
 // ------------------------------------------------------------------ G worker appends, infra retry rounds, the allSettled barrier
@@ -351,13 +350,14 @@ test('G an automatic infra retry of a review repair re-dispatches within its rou
 // committed settle, never by a timer. A timed-out attempt fails the test by name instead of
 // surfacing as a bare "Missing expected rejection".
 test('G a throw inside the dispatch loop still waits for every running sibling before the lock is released', { skip: WIN_SKIP }, async (t) => {
-  const fx = fixture(t, { config: { budget: { ticket_tokens: 1e9 }, width: 2, timeoutMs: WORKER_FAILURE_BOUND_MS },
+  const fx = fixture(t, { config: { width: 2, timeoutMs: WORKER_FAILURE_BOUND_MS },
     nodes: [{ id: 'a', writes: ['src/a.txt'] }, { id: 'c', writes: ['src/c.txt'] }, { id: 'b', writes: ['src/b.txt'] }] });
   const flag = join(fx.root, 'release-a');
-  const usageDir = relative(fx.repo, fx.usageFile()) + '/x';
-  // c creates the usage path as a directory; a is released only once c's settle is COMMITTED (no
-  // timer), so the rescan after c throws EISDIR in budgetOk(b) while a is still running.
-  fx.behave({ a: { write: { 'src/a.txt': 'a1' }, waitFor: flag }, c: { write: { 'src/c.txt': 'c1', [usageDir]: '' } }, b: { write: { 'src/b.txt': 'b1' } } });
+  // a is released only once c's settle is COMMITTED (no timer), so the rescan after c throws inside the dispatch loop
+  // (the live admission probe for b beside the running a, D9: formerly the token-budget read) while a is still running.
+  fx.behave({ a: { write: { 'src/a.txt': 'a1' }, waitFor: flag }, c: { write: { 'src/c.txt': 'c1' } }, b: { write: { 'src/b.txt': 'b1' } } });
+  const cSettled = () => JSON.parse(readFileSync(fx.stateFile(), 'utf8')).attempts.some(x => x.node === 'c' && x.status === 'exited');
+  const probe = { ...ROOMY_HOST, cpus: () => { if (cSettled()) throw Object.assign(new Error('injected probe fault'), { code: 'EISDIR' }); return ROOMY_HOST.cpus(); } };
   await init(fx.ctx());
   const hooks = { boundary: async (name) => {
     if (name !== 'dir-fsync' || existsSync(flag)) return;
@@ -365,7 +365,7 @@ test('G a throw inside the dispatch loop still waits for every running sibling b
   } };
   let thrown = null, result = null;
   // Admission pinned: a is released only by c's settle, so a and c must run at once (a live refusal would serialize them).
-  try { result = await drive(fx.ctx({ hooks, admissionProbe: ROOMY_HOST })); } catch (e) { thrown = e; }
+  try { result = await drive(fx.ctx({ hooks, admissionProbe: probe })); } catch (e) { thrown = e; }
   const timedOut = fx.readState().attempts.filter(x => x.status === 'timed_out').map(x => `${x.node} (${x.attempt_id})`);
   assert.deepEqual(timedOut, [], `attempt(s) exceeded the ${WORKER_FAILURE_BOUND_MS} ms failure bound (slow machine, or a release that never happened)`);
   assert.equal(thrown?.code, 'EISDIR', thrown ? String(thrown.stack ?? thrown) : `drive resolved without the expected EISDIR: ${JSON.stringify(result?.judgments ?? result)}`);

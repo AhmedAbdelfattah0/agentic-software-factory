@@ -290,10 +290,7 @@ export function acceptedView(input) {
   if (S.run_id !== input.runId) block('run_mismatch', 'owner', `the engine state belongs to run ${S.run_id}, not ${input.runId}`, [at(['run_id'], S.run_id)]);
   if ((statusOut.judgments ?? []).length) block(statusOut.judgments[0].code, 'judgment', 'the engine reports open judgment(s)', [], { judgments: statusOut.judgments.map(j => ({ code: j.code, node: j.node ?? null, reason: j.reason })) });
   if ((statusOut.authority_untrusted ?? []).length) block('authority_untrusted', 'owner', 'RUN-STATE authority line(s) appeared while work was live: the owner re-appends them', [], { lines: statusOut.authority_untrusted });
-  // status evaluates the ticket budget only (no phase); a spent phase budget shows as the drive's own budget_stop judgment
-  const b = statusOut.budget;
-  if (b?.ticket?.state === 'stop_dispatch') block('budget_spent', 'owner', 'the ticket token budget is spent', [], { budget: b });
-  else if (b && ((b.flags ?? []).length || b.ticket?.state === 'unknown')) block('budget_unknown', 'unknown', 'the budget cannot be evaluated', [], { budget: b });
+  // D9: statusOut.budget (token estimate/actual/delta) is passive telemetry and never a blocker, at any overrun or unknown usage
   const live = (S.attempts ?? []).map((a, i) => [a, i]).filter(([a]) => LIVE.includes(a.status));
   if (live.length) block('attempts_live', 'unknown', 'attempts are live or their quiescence is unproven', live.map(([a, i]) => at(['attempts', i, 'status'], a.status)));
   if (L.usable && L.outcome === 'judgment' && !L.judgments.some(j => BINDING.has(j.code))) block('drive_judgment', 'judgment', 'the drive output ended in a judgment', [{ source: 'last', file: L.file, pointer: '/outcome', value: 'judgment' }], { judgments: L.judgments });

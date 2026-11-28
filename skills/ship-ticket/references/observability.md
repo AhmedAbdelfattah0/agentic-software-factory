@@ -203,7 +203,7 @@ Read-only; each prints `unknown` where its source lacks data, never 0, and none 
   never added; subscription estimates are not charges). `unknown` for an incomplete run or one
   with no reported cost. `cross_run` keeps the per-basis averages.
 - `tokens_by_phase`: processed tokens per usage phase; records without a phase (imports without
-  `--phase`) are the `phase unknown` bucket, counted against the ticket budget only.
+  `--phase`) are the `phase unknown` bucket, counted toward the ticket total only.
 - `attempt_timing`: per engine attempt `wall_ms`, `api_ms` (provider-reported API time, from the engine
   state's usage record with the attempt id, or a `--usage` record) and `other_ms = wall - api_ms`. Worker
   attempts of claude carry `api_ms`; review executions do not (session and codex imports carry none), so

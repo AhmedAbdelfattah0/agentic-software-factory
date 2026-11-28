@@ -95,7 +95,7 @@ reported that counter, so a total backed by fewer events than `events` is partia
   subagents; Codex relay usage is its own source. Importing an execution already
   present from any source is refused (the aggregate wins), except a later reading of the same
   execution from the same source with strictly larger counters (a session imported mid-stream and
-  again later): it replaces the earlier record (`replaced`), so the budget never keeps the lower count.
+  again later): it replaces the earlier record (`replaced`), so the token totals never keep the lower count.
 - Totals are partitioned by `cost_basis`; different bases are never summed
   (`totalsByBasis`).
 - Missing counters stay `null` and are never zero. `cache_hit_ratio` (cache reads
@@ -106,10 +106,10 @@ last revision per message id, and assigns `role` to the main file and `--subagen
 (default `unattributed`, never a guessed `reviewer`) to subagent files. `import-codex` records `usage_status: "unknown"` with null
 counters when the relay reports no usage; nothing is invented. `--phase`
 (`PLAN|BUILD|PROVE|REVIEW|REPAIR|SHIP`) tags every imported record with that phase; without it
-the record carries no phase: it is **phase unknown**, counted against the ticket budget only (never
-against a phase budget), summed in `status.budget.phase_unknown` (`{records, tokens}`, present when
+the record carries no phase: it is **phase unknown**, counted toward the ticket total only (never
+toward a phase), summed in `status.budget.phase_unknown` (`{records, tokens}`, present when
 any exists) and in the `eval` report's `tokens_by_phase` under `phase unknown`. Records that carry a
-phase keep their phase-budget semantics unchanged.
+phase keep their phase attribution unchanged. All of it is passive telemetry: token usage never gates anything.
 
 ## Run engine
 

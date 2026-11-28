@@ -45,9 +45,9 @@
  * ship-ready also refuses: 'nodes_unfinished', 'attempts_live', 'repairs_open',
  *   'judgments_unresolved'; local proof only from the engine-run testCommands (input
  *   local_proof is a usage error).
- * Budgets: usage = engine records + the imported file git-path ai-skills/ship-ticket/<ticket>.usage.jsonl,
- *   deduplicated by source_execution_id, evaluated with the dispatching item's phase before every
- *   node AND repair dispatch. status.budget = { ticket, phase, flags } (null without a budget).
+ * Token telemetry (D9, passive): usage = engine records + the imported file git-path ai-skills/ship-ticket/<ticket>.usage.jsonl,
+ *   deduplicated by source_execution_id; it never gates a dispatch (token-budget-passive.test.mjs).
+ *   status.budget = { ticket: { estimate, used, delta }, phase, usage_unknown } (null without an estimate).
  *   Engine usage records carry role and source 'engine'.
  * Telemetry: a failing run-log or RUN-STATE sink never fails a command: the event stays in the
  *   outbox and status.telemetry_degraded lists it; resume replays it.
@@ -458,59 +458,34 @@ test('R10 a proof command that changes the work tree is refused; SHIP_READY is n
 const usageRow = (id, tokens, over = {}) => JSON.stringify({ provider: 'claude', run_id: 'run-1', role: 'orchestrator', source: 'session',
   source_execution_id: id, input_tokens: tokens, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, ...over });
 
-test('R11 imported usage counts before every dispatch, deduplicated by source_execution_id', { skip: WIN_SKIP }, async (t) => {
+test('R11 imported usage is deduplicated by source_execution_id and reported; a 2x overrun still dispatches (D9)', { skip: WIN_SKIP }, async (t) => {
   const dup = fixture(t, { config: { budget: { ticket_tokens: 500 } } });
   ok(dup.cli('init', { dag: dup.dagFile }));
   mkdirSync(dirname(dup.usageFile()), { recursive: true });
   writeFileSync(dup.usageFile(), usageRow('s:1', 300) + '\n' + usageRow('s:1', 300) + '\n');
   ok(dup.cli('drive'), 'the same execution imported twice counts once');
   assert.equal(dup.runs('a').length, 1);
+  assert.equal(dup.cli('status').out.budget.ticket.used, 306);
 
   const over = fixture(t, { config: { budget: { ticket_tokens: 500 } } });
   ok(over.cli('init', { dag: over.dagFile }));
   mkdirSync(dirname(over.usageFile()), { recursive: true });
   writeFileSync(over.usageFile(), usageRow('s:1', 1000) + '\n');
-  const r = over.cli('drive');
-  assert.equal(r.status, 2, r.stdout + r.stderr);
-  assert.ok(codes(r.out).includes('budget_stop'));
-  assert.equal(over.runs('a').length, 0);
+  ok(over.cli('drive'));
+  assert.equal(over.runs('a').length, 1);
 });
 
-test('R11 phase_tokens are enforced with the dispatching node phase', { skip: WIN_SKIP }, async (t) => {
-  const fx = fixture(t, { config: { budget: { phase_tokens: 5 } }, nodes: [{ id: 'a', writes: ['src/a.txt'] }, { id: 'b', deps: ['a'], writes: ['src/b.txt'] }],
-    behaviour: { a: { write: { 'src/a.txt': 'a1' } }, b: { write: { 'src/b.txt': 'b1' } } } });
-  ok(fx.cli('init', { dag: fx.dagFile }));
-  const r = fx.cli('drive');
-  assert.equal(r.status, 2, r.stdout + r.stderr);
-  assert.ok(codes(r.out).includes('budget_stop'));
-  assert.equal(fx.runs('b').length, 0, 'BUILD used 6 of 5 phase tokens');
-});
-
-test('R11 repairs go through budget admission', { skip: WIN_SKIP }, async (t) => {
-  const fx = fixture(t, { commit: true, config: { budget: { ticket_tokens: 100 } } });
-  ok(fx.cli('init', { dag: fx.dagFile }));
-  ok(fx.cli('drive'));
-  ok(fx.gate('review', failReview('rx-1', fx.candidate(), 'src/a.txt', fx.prompt('fix'))));
-  writeFileSync(fx.usageFile(), usageRow('reviewer:1', 200, { role: 'reviewer' }) + '\n');
-  const r = fx.cli('drive');
-  assert.equal(r.status, 2, r.stdout + r.stderr);
-  assert.ok(codes(r.out).includes('budget_stop'));
-  assert.equal(fx.runs('fix').length, 0);
-  assert.equal(r.out.rounds.review_repairs['rx-1'] ?? 0, 0);
-});
-
-test('R11 status shows the budget warning and budget_unenforceable; engine usage carries role and source', { skip: WIN_SKIP }, async (t) => {
+test('R11 status reports the token estimate, actual and delta and usage_unknown; engine usage carries role and source', { skip: WIN_SKIP }, async (t) => {
   const fx = fixture(t, { config: { budget: { ticket_tokens: 7 } } });
   ok(fx.cli('init', { dag: fx.dagFile }));
   ok(fx.cli('drive'));
-  const warn = fx.cli('status').out;
-  assert.equal(warn.budget.ticket.state, 'warn', JSON.stringify(warn.budget));
+  assert.deepEqual(fx.cli('status').out.budget.ticket, { estimate: 7, used: 6, delta: -1 });
   const rec = fx.readState().usage[0];
   assert.equal(rec.role, 'builder');
   assert.equal(rec.source, 'engine');
   writeFileSync(fx.usageFile(), JSON.stringify({ provider: 'codex', run_id: 'run-1', role: 'reviewer', source: 'codex', source_execution_id: 'relay-1',
     input_tokens: null, output_tokens: null, usage_status: 'unknown' }) + '\n');
-  assert.ok(fx.cli('status').out.budget.flags.includes('budget_unenforceable'));
+  assert.equal(fx.cli('status').out.budget.usage_unknown, true);
 });
 
 test('R11 an import line that parses but is not a valid usage record is unknown usage, never a crash', async (t) => {
@@ -520,7 +495,7 @@ test('R11 an import line that parses but is not a valid usage record is unknown 
   writeFileSync(fx.usageFile(), usageRow('s:1', 10, { provider: 'gpt' }) + '\n' + usageRow('s:2', 1.5) + '\n' + '{not json\n');
   const s = fx.cli('status');
   ok(s);
-  assert.ok(s.out.budget.flags.includes('budget_unenforceable'), JSON.stringify(s.out.budget));
+  assert.equal(s.out.budget.usage_unknown, true, JSON.stringify(s.out.budget));
 });
 
 // ------------------------------------------------------------------ R12 telemetry never blocks

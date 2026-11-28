@@ -50,7 +50,7 @@
  * B12: launcher output past 32 MiB sets envelope { truncated: true, stdout_bytes }; the outcome is
  *   unchanged; status/eval list `truncated_outputs` only when any exists.
  * I7: usage.mjs import-* take an optional --phase; without it a record is phase unknown: ticket
- *   budget only, status.budget.phase_unknown {records, tokens}, eval tokens_by_phase['phase unknown'].
+ *   total only, status.budget.phase_unknown {records, tokens}, eval tokens_by_phase['phase unknown'].
  * =========================================================================================
  */
 import test from 'node:test';
@@ -640,7 +640,7 @@ test('2b B12: output past the 32 MiB cap is flagged truncated with its byte coun
   assert.equal('truncated_outputs' in evaluateRun(buildRun('T-1', 'run-1', []), { state: { ...fx.readState(), attempts: [] } }), false);
 });
 
-test('2b I7: imported usage without --phase is phase unknown in status and eval and spends the ticket budget only', { skip: WIN_SKIP }, (t) => {
+test('2b I7: imported usage without --phase is phase unknown in status and eval and counts toward the ticket total only', { skip: WIN_SKIP }, (t) => {
   const fx = fixture(t, { commit: true, config: { budget: { ticket_tokens: 1000, phase_tokens: 100 } },
     nodes: [node('a'), node('b'), node('c')], behaviour: { a: { write: { 'src/a.txt': 'a' } }, b: { write: { 'src/b.txt': 'b' } }, c: { write: { 'src/c.txt': 'c' } } } });
   ok(fx.cli('init', { dag: fx.dagFile }));
@@ -652,16 +652,14 @@ test('2b I7: imported usage without --phase is phase unknown in status and eval 
   const s = fx.cli('status').out;
   assert.deepEqual(s.budget.phase_unknown, { records: 1, tokens: 500 });
   assert.equal(s.budget.ticket.used, 506);
-  ok(fx.cli('drive', { until: 'b' }), 'the BUILD phase budget is not spent by phase-unknown usage');
+  ok(fx.cli('drive', { until: 'b' }), 'phase-unknown usage is not attributed to BUILD');
   assert.equal(fx.runs('b').length, 1);
   imp(relay('cx-2', 200), '--phase', 'BUILD');
-  const stop = fx.cli('drive');
-  assert.equal(stop.status, 2);
-  assert.ok(stop.out.judgments.some(j => j.code === 'budget_stop' && /BUILD phase budget/.test(j.reason)), J(stop.out.judgments));
-  assert.equal(fx.runs('c').length, 0);
+  ok(fx.cli('drive'), 'D9: BUILD at 212 of its 100-token estimate still dispatches');
+  assert.equal(fx.runs('c').length, 1);
   const records = readFileSync(fx.usageFile(), 'utf8').trim().split('\n').map(l => JSON.parse(l));
   const m = evaluateRun(attachUsage(buildRun('T-1', 'run-1', []), [...fx.readState().usage, ...records]), { state: fx.readState() });
-  assert.deepEqual(Object.fromEntries(Object.entries(m.tokens_by_phase).map(([p, v]) => [p, v.processed_tokens])), { BUILD: 6 + 6 + 200, 'phase unknown': 500 });
+  assert.deepEqual(Object.fromEntries(Object.entries(m.tokens_by_phase).map(([p, v]) => [p, v.processed_tokens])), { BUILD: 6 + 6 + 6 + 200, 'phase unknown': 500 });
 });
 
 test('repair: unit ids such as constructor and toString work through init, drive and status; __proto__ is refused', { skip: WIN_SKIP }, (t) => {

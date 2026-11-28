@@ -445,10 +445,10 @@ another patch. There is no third repair cycle inside one review execution, and n
 a ticket run the Factory resumes on its own, by writing the assessment and then a `RETRY` (`authorized_by`
 `factory:bounded-retry`, never the owner's name), while the correction stays inside the approved scope and each round
 makes progress: strictly fewer findings, or a finding set not seen in an earlier round (an oscillation is not
-progress). A Factory retry is allowed after the first no-progress round; stop after two CONSECUTIVE no-progress rounds. Each new original review spends one second-reviewer run of the cap and counts against the ticket's
-`config.budget` token ceiling, which is mandatory for any run that uses this path, a single ticket included. A
+progress). A Factory retry is allowed after the first no-progress round; stop after two CONSECUTIVE no-progress rounds. Each new original review spends one second-reviewer run of the cap; token usage never gates it
+([execution-harness.md](execution-harness.md) "Token telemetry"). A
 backstop ceiling of 6 corrective rounds per ticket applies. Owner approval is required when two consecutive rounds
-show no progress, when the budget or the second-reviewer cap is spent, when the fix would change requirements,
+show no progress, when the second-reviewer cap is spent, when the fix would change requirements,
 scope, security guarantees or an owner-reserved decision (a revised plan returns to the owner), for any security
 review, a stale or disputed security review or any FAIL carrying a security finding, on any ticket tier, for an
 overflow FAIL (`review_terminal`), and for a `RETRY` that serves post-freeze drift or a moved base. For Factory-dev

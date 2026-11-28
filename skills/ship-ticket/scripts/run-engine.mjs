@@ -321,7 +321,7 @@ function view(E, transient = []) {
     judgments: [...S.judgments, ...transient.filter(j => !(j.code === 'security_reapproval' && S.security?.reapproval)), ...failed, ...failedRepairs,
       ...redInvalidJudgments(S), ...(units ? unitJudgments(S, units) : []), ...(unitReviewOn(S) ? unitReviewJudgments(S, units) : []), ...securityJudgments(S)],
     rounds: structuredClone(S.rounds), confirmation: S.confirmation ?? null, red_pending: redPending(S),
-    budget: budget && { ticket: budget.ticket, phase: budget.phase, flags: budget.flags,
+    budget: budget && { ticket: budget.ticket, phase: budget.phase, usage_unknown: budget.usage_unknown,
       ...(budget.phase_unknown.records ? { phase_unknown: budget.phase_unknown } : {}) },
     authority_untrusted: (S.authority?.untrusted ?? []).map(u => JSON.parse(u.line)),
     telemetry_degraded: structuredClone(S.telemetry_degraded),

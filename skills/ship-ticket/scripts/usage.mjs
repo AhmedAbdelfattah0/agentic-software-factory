@@ -56,7 +56,7 @@ export function extractUsage(provider, stdout) {
       reasoning_tokens: count(u.output_tokens_details?.thinking_tokens),
       reported_cost_usd: typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 ? cost : null,
       cost_basis: bases.length && bases.every(b => b === bases[0]) && /^[a-z_]{1,32}$/.test(bases[0]) ? bases[0] : null,
-      // Non-counters, absent (reported `unknown`, never 0) unless the CLI carried them; never summed into a budget.
+      // Non-counters, absent (reported `unknown`, never 0) unless the CLI carried them; never summed into the token totals.
       ...optional('api_ms', parsed.duration_api_ms), ...(count(parsed.num_turns) === null ? {} : { num_turns: parsed.num_turns }),
       // Every model the CLI billed for this run, sorted; absent when the CLI named none.
       ...modelsField(Object.keys(parsed.modelUsage ?? {})),
@@ -131,7 +131,7 @@ export function readEvents(path) {
 
 const TOKEN_COUNTERS = Object.freeze(['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens']);
 const IMPORT_ROLES = new Set(['orchestrator', 'reviewer', 'unattributed']);
-/** Phases an imported record may name (`--phase`); without one its phase is unknown: ticket budget only. */
+/** Phases an imported record may name (`--phase`); without one its phase is unknown: ticket total only. */
 export const IMPORT_PHASES = Object.freeze(['PLAN', 'BUILD', 'PROVE', 'REVIEW', 'REPAIR', 'SHIP']);
 const METRICS = Object.freeze({
   processed_tokens: ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens'],
@@ -296,39 +296,33 @@ export function addUsageRecords(existing, incoming) {
   return { records, refused, replaced };
 }
 
-/** Budget state for `used` against `limit`; null when no limit is set. A known overage stops even when some usage is unknown. */
-function budgetState(used, limit, unknown) {
-  if (limit === null) return null;
-  if (used >= limit) return 'stop_dispatch';
-  if (unknown) return 'unknown';
-  return used >= 0.8 * limit ? 'warn' : 'ok';
-}
-
-/** Optional positive-integer budget limit; null when absent. */
+/** Optional positive-integer token estimate; null when absent. */
 function checkLimit(v, label) {
   if (v === undefined || v === null) return null;
   if (!Number.isSafeInteger(v) || v <= 0) throw new Error(label + ' must be a positive integer');
   return v;
 }
 
+/** Passive estimate/actual/delta record; the delta is null when no estimate is set. */
+const measured = (estimate, used) => ({ estimate, used, delta: estimate === null ? null : used - estimate });
+
 /**
- * Evaluate dispatch budgets `{ticket_tokens?, phase_tokens?}` against usage
- * records. States: ok (<80%), warn (>=80%), stop_dispatch (>=100%: no new
- * dispatch), unknown (some usage unreported — flagged `budget_unenforceable`,
- * never treated as within budget). In-flight records count toward `used`;
- * `overshoot` reports how far the ticket budget was exceeded and by how much
- * in-flight work. A budget that is not set has state null; `phase` is null
- * unless both `phase_tokens` and `opts.phase` are given. Records without a `phase` count against the
- * ticket budget only and are summed in `phase_unknown` ({ records, tokens }).
+ * D9 (owner decision 2026-11-28): token budgets are PASSIVE TELEMETRY. `{ticket_tokens?, phase_tokens?}` are
+ * estimates, recorded beside the actual usage and the difference for retrospective analysis only. The result
+ * carries no state, threshold, warning or dispatch verdict: token use never gates dispatch, admission,
+ * routing, retry, recovery, escalation or completion, at any overrun. Unknown usage (some record unreported)
+ * is `usage_unknown: true`, never read as 0. In-flight records count toward `used` and are summed in
+ * `in_flight_tokens`. `phase` is null unless both `phase_tokens` and `opts.phase` are given. Records without
+ * a `phase` count toward the ticket only and are summed in `phase_unknown` ({ records, tokens }).
  */
 export function evaluateBudget(records, budget = {}, { metric = 'processed_tokens', phase } = {}) {
   if (!Object.hasOwn(METRICS, metric)) throw new Error('unsupported budget metric: ' + metric);
   if (!Array.isArray(records)) throw new Error('usage records must be an array');
   const keys = METRICS[metric];
   const tokens = (e) => keys.reduce((a, k) => a + (typeof e[k] === 'number' ? e[k] : 0), 0);
-  const ticketLimit = checkLimit(budget?.ticket_tokens, 'ticket_tokens');
-  const phaseLimit = checkLimit(budget?.phase_tokens, 'phase_tokens');
-  let used = 0, inFlight = 0, unknown = false, phaseUsed = 0, phaseUnknown = false, noPhase = 0, noPhaseTokens = 0;
+  const ticketEstimate = checkLimit(budget?.ticket_tokens, 'ticket_tokens');
+  const phaseEstimate = checkLimit(budget?.phase_tokens, 'phase_tokens');
+  let used = 0, inFlight = 0, unknown = false, phaseUsed = 0, noPhase = 0, noPhaseTokens = 0;
   for (const e of records) {
     checkRecord(e);
     const known = hasKnownUsage(e);
@@ -336,17 +330,13 @@ export function evaluateBudget(records, budget = {}, { metric = 'processed_token
     if (!known) unknown = true;
     used += n;
     if (e.in_flight === true) inFlight += n;
-    if (phase !== undefined && e.phase === phase) { phaseUsed += n; if (!known) phaseUnknown = true; }
+    if (phase !== undefined && e.phase === phase) phaseUsed += n;
     if (typeof e.phase !== 'string') { noPhase++; noPhaseTokens += n; }
   }
-  const ticket = { limit: ticketLimit, used, state: budgetState(used, ticketLimit, unknown) };
-  const phaseResult = phaseLimit !== null && phase !== undefined
-    ? { name: phase, limit: phaseLimit, used: phaseUsed, state: budgetState(phaseUsed, phaseLimit, phaseUnknown) } : null;
   return {
-    schema: 'ship-ticket-budget-v1', metric, used, ticket, phase: phaseResult,
-    dispatch_allowed: ticket.state !== 'stop_dispatch' && phaseResult?.state !== 'stop_dispatch',
-    flags: unknown ? ['budget_unenforceable'] : [],
-    overshoot: { tokens: ticketLimit === null ? 0 : Math.max(0, used - ticketLimit), in_flight_tokens: inFlight },
+    schema: 'ship-ticket-budget-v2', metric, used, ticket: measured(ticketEstimate, used),
+    phase: phaseEstimate !== null && phase !== undefined ? { name: phase, ...measured(phaseEstimate, phaseUsed) } : null,
+    usage_unknown: unknown, in_flight_tokens: inFlight,
     phase_unknown: { records: noPhase, tokens: noPhaseTokens },
   };
 }

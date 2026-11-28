@@ -41,7 +41,7 @@ flowchart TB
 - **Merge is always opt-in.** The default is that the owner merges, asked once, in the unified plan.
   Migrations, payments, row-level security and tickets with deploy preconditions always stay owner
   merge. Deploy is always a separate decision.
-- **Owner stops and capability blockers** (security, approval, ownership, spent budget, a drift, security or base `RETRY`, no reviewer or credentials) park the ticket and its genuine
+- **Owner stops and capability blockers** (security, approval, ownership, a drift, security or base `RETRY`, no reviewer or credentials) park the ticket and its genuine
   dependents. Routine failures are corrected by the Factory inside the approved scope; routine rebasing is Factory work. Independent work continues.
 - **Preflight.** Before the first ticket starts a second reviewer must be able to run and permissions must be
   pre-granted, or the run does not start.

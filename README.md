@@ -52,7 +52,7 @@ give the same answer every time are code.
 | File ownership detection | The plan names the files each worker may change. After a worker exits, the engine detects any write outside that list and fails the task. |
 | Durable state and crash recovery | Engine state is atomic and resumable after a crash or a killed session (POSIX). |
 | Incremental execution and evidence reuse | Work is fingerprinted by content; when an input changes, only the affected tasks and their dependents are re-run. |
-| Optional token budgets and usage tracking | A configured token ceiling stops new dispatch when spent. Usage is recorded from provider reports; no saving is claimed. |
+| Token usage tracking | Usage is recorded from provider reports beside an optional estimate and the difference. Token usage never gates anything; no saving is claimed. |
 | Risk-driven verification and security testing | Risk labels decide which evidence the ship-ready gate demands. Where the plan requires it, the engine runs the failing test itself before production code is accepted. `vapt` attacks a local instance and commits the abuse cases as tests. |
 | Candidate integrity and digest binding | The approved plan, the task graph and the reviewed bytes are each pinned by a digest. A later change is refused or detected. |
 | Independent reviews and second opinions | A second reviewer is recorded and must differ from the builders and the primary reviewer. Review allows one repair batch and one targeted confirmation. |

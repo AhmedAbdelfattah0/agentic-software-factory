@@ -37,17 +37,14 @@ const USAGE_CLI = join(dirname(fileURLToPath(import.meta.url)), 'usage.mjs');
  *     record (the aggregate) wins. Duplicates inside `incoming` are also refused after the first.
  *
  * evaluateBudget(records, budget:{ticket_tokens?, phase_tokens?}, { metric = 'processed_tokens', phase } = {}) ->
- *   { metric, used, ticket:{limit, used, state}, phase:{limit, used, state}|null, dispatch_allowed, flags:[], overshoot,
- *     phase_unknown:{records, tokens} }   (records without a `phase`: ticket budget only)
+ *   { schema, metric, used, ticket:{estimate, used, delta}, phase:{name, estimate, used, delta}|null, usage_unknown,
+ *     in_flight_tokens, phase_unknown:{records, tokens} }   (records without a `phase`: ticket total only)
+ *   D9: passive telemetry only (no state, threshold, warning or dispatch verdict); delta = used - estimate, null without one.
  *   - metric 'processed_tokens' = input+output+cache_read+cache_write; 'output_tokens' = output only.
  *     (null counters count 0 inside a record that reports at least one counter.)
- *   - state: 'ok' (<80%), 'warn' (>=80% and <100%), 'stop_dispatch' (>=100%), 'unknown'.
- *   - dispatch_allowed false when any applicable state is 'stop_dispatch'.
- *   - phase budget counts only records with record.phase === opts.phase.
- *   - records with `in_flight: true` were dispatched before the stop: overshoot = { tokens: max(0, used-limit) of the
- *     ticket budget, in_flight_tokens: metric tokens of in_flight records }.
- *   - if ANY record has no known counter (usage unknown), flags includes 'budget_unenforceable' and the
- *     affected budget state is 'unknown' (never 'ok') unless it is already 'stop_dispatch'.
+ *   - phase usage counts only records with record.phase === opts.phase.
+ *   - in_flight_tokens: metric tokens of records with `in_flight: true` (they still count toward `used`).
+ *   - if ANY record has no known counter (usage unknown), usage_unknown is true; it adds nothing to `used`.
  *
  * CLI: usage.mjs import-session <jsonl> --run-id <id> --out <usage.jsonl> [--since iso] [--until iso] [--role orchestrator|reviewer] [--phase <PHASE>]
  *      usage.mjs import-codex <result.json> --run-id <id> --out <usage.jsonl> [--role reviewer] [--phase <PHASE>]
@@ -197,58 +194,45 @@ test('RED usage: import-codex records counters when reported and unknown (never 
   assert.equal(JSON.parse(readFileSync(out, 'utf8').trim()).usage_status, 'unknown');
 });
 
-test('RED usage: budget warns at 80%, stops dispatch at 100%, reports in-flight overshoot', () => {
+test('D9 usage: the estimate is recorded beside the actual and the delta at any overrun; in-flight usage counts and is reported', () => {
   const evaluateBudget = fn('evaluateBudget');
   const r = (o) => rec({ source: 'carrier', source_execution_id: 'x' + Math.random(), ...o });
   const budget = { ticket_tokens: 1000 };
   const mk = (n, extra = {}) => [r({ input_tokens: n - 10, output_tokens: 5, cache_read_tokens: 3, cache_write_tokens: 2, ...extra })];
-  assert.equal(evaluateBudget(mk(790), budget).ticket.state, 'ok');
-  const warn = evaluateBudget(mk(800), budget);
-  assert.equal(warn.ticket.state, 'warn');
-  assert.equal(warn.dispatch_allowed, true);
-  assert.equal(warn.ticket.used, 800);
-  assert.equal(warn.ticket.limit, 1000);
-  assert.equal(evaluateBudget(mk(999), budget).ticket.state, 'warn');
-  const stop = evaluateBudget(mk(1000), budget);
-  assert.equal(stop.ticket.state, 'stop_dispatch');
-  assert.equal(stop.dispatch_allowed, false);
+  assert.deepEqual(evaluateBudget(mk(790), budget).ticket, { estimate: 1000, used: 790, delta: -210 });
+  assert.deepEqual(evaluateBudget(mk(1000), budget).ticket, { estimate: 1000, used: 1000, delta: 0 });
+  assert.deepEqual(evaluateBudget(mk(11000), budget).ticket, { estimate: 1000, used: 11000, delta: 10000 }, '1,000% over is a number, not a state');
   const over = evaluateBudget([...mk(900), ...mk(300, { in_flight: true })], budget);
-  assert.equal(over.ticket.state, 'stop_dispatch');
-  assert.equal(over.overshoot.tokens, 200);
-  assert.equal(over.overshoot.in_flight_tokens, 300);
-  const none = evaluateBudget(mk(1500), budget);
-  assert.equal(none.overshoot.in_flight_tokens, 0);
+  assert.equal(over.ticket.delta, 200);
+  assert.equal(over.in_flight_tokens, 300);
+  assert.equal(evaluateBudget(mk(1500), budget).in_flight_tokens, 0);
+  for (const v of [evaluateBudget(mk(11000), budget), over]) {
+    assert.deepEqual(Object.keys(v).sort(), ['in_flight_tokens', 'metric', 'phase', 'phase_unknown', 'schema', 'ticket', 'usage_unknown', 'used']);
+  }
 });
 
-test('RED usage: phase budget counts only that phase', () => {
+test('RED usage: phase usage counts only that phase', () => {
   const evaluateBudget = fn('evaluateBudget');
   const records = [
     rec({ source: 'carrier', source_execution_id: 'p1', phase: 'BUILD', input_tokens: 850, output_tokens: 0 }),
     rec({ source: 'carrier', source_execution_id: 'p2', phase: 'REPAIR', input_tokens: 100, output_tokens: 0 }),
   ];
   const r = evaluateBudget(records, { ticket_tokens: 10000, phase_tokens: 1000 }, { phase: 'BUILD' });
-  assert.equal(r.phase.used, 850);
-  assert.equal(r.phase.state, 'warn');
-  assert.equal(r.ticket.state, 'ok');
-  assert.equal(evaluateBudget(records, { ticket_tokens: 10000, phase_tokens: 1000 }, { phase: 'REPAIR' }).phase.state, 'ok');
+  assert.deepEqual(r.phase, { name: 'BUILD', estimate: 1000, used: 850, delta: -150 });
+  assert.deepEqual(r.ticket, { estimate: 10000, used: 950, delta: -9050 });
+  assert.equal(evaluateBudget(records, { ticket_tokens: 10000, phase_tokens: 1000 }, { phase: 'REPAIR' }).phase.used, 100);
 });
 
-test('RED usage: unknown usage is budget_unenforceable, never within budget', () => {
+test('RED usage: unknown usage is recorded as usage_unknown, never read as 0 and never a verdict', () => {
   const evaluateBudget = fn('evaluateBudget');
   const records = [
     rec({ source: 'carrier', source_execution_id: 'k1', input_tokens: 10, output_tokens: 1 }),
     rec({ provider: 'codex', source: 'codex', source_execution_id: 'u1', usage_status: 'unknown', input_tokens: null, output_tokens: null }),
   ];
   const r = evaluateBudget(records, { ticket_tokens: 1000 });
-  assert.ok(r.flags.includes('budget_unenforceable'));
-  assert.notEqual(r.ticket.state, 'ok');
-  assert.equal(r.ticket.state, 'unknown');
-  const known = evaluateBudget(records.slice(0, 1), { ticket_tokens: 1000 });
-  assert.ok(!known.flags.includes('budget_unenforceable'));
-  assert.equal(known.ticket.state, 'ok');
-  const stopped = evaluateBudget([...records, rec({ source: 'carrier', source_execution_id: 'k2', input_tokens: 2000, output_tokens: 0 })], { ticket_tokens: 1000 });
-  assert.equal(stopped.ticket.state, 'stop_dispatch', 'known overage still stops');
-  assert.ok(stopped.flags.includes('budget_unenforceable'));
+  assert.equal(r.usage_unknown, true);
+  assert.equal(r.ticket.used, 11);
+  assert.equal(evaluateBudget(records.slice(0, 1), { ticket_tokens: 1000 }).usage_unknown, false);
 });
 
 test('RED usage: processed_tokens is input+output+cache_read+cache_write; configurable to output_tokens', () => {
@@ -260,13 +244,13 @@ test('RED usage: processed_tokens is input+output+cache_read+cache_write; config
   const out = evaluateBudget(records, { ticket_tokens: 100 }, { metric: 'output_tokens' });
   assert.equal(out.metric, 'output_tokens');
   assert.equal(out.used, 10);
-  assert.equal(out.ticket.state, 'ok');
+  assert.deepEqual(out.ticket, { estimate: 100, used: 10, delta: -90 });
   assert.throws(() => evaluateBudget(records, { ticket_tokens: 100 }, { metric: 'bogus' }), /metric/);
 });
 
 // ---- AIS-HARNESS-3 Wave 2b-i, I7: optional --phase on import; absent = phase unknown (ticket budget only)
 
-test('I7 usage: --phase tags imported records; without it the record has no phase and counts against the ticket budget only', (t) => {
+test('I7 usage: --phase tags imported records; without it the record has no phase and counts toward the ticket total only', (t) => {
   const root = session(t);
   writeFileSync(join(root, 'relay.json'), JSON.stringify({ execution_id: 'cx-9', usage: { input_tokens: 300, output_tokens: 0 } }));
   const out = join(root, 'u.jsonl');
@@ -283,10 +267,11 @@ test('I7 usage: --phase tags imported records; without it the record has no phas
   const evaluateBudget = fn('evaluateBudget');
   const withBuild = [...records, rec({ source: 'carrier', source_execution_id: 'b1', phase: 'BUILD', input_tokens: 50, output_tokens: 0 })];
   const v = evaluateBudget(withBuild, { ticket_tokens: 10000, phase_tokens: 100 }, { phase: 'BUILD' });
-  assert.equal(v.phase.used, 50, 'records carrying a phase keep their phase-budget semantics');
+  assert.equal(v.phase.used, 50, 'records carrying a phase keep their phase attribution');
   assert.equal(v.ticket.used, 50 + 300 + records.slice(0, 3).reduce((a, r) => a + r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_write_tokens, 0));
   assert.deepEqual(v.phase_unknown, { records: 1, tokens: 300 });
-  assert.equal(evaluateBudget(withBuild, { ticket_tokens: 10000, phase_tokens: 100 }, { phase: 'REVIEW' }).phase.state, 'stop_dispatch');
+  const review = evaluateBudget(withBuild, { ticket_tokens: 10000, phase_tokens: 100 }, { phase: 'REVIEW' }).phase;
+  assert.deepEqual([review.name, review.estimate, review.delta], ['REVIEW', 100, review.used - 100]);
 });
 
 // ---- Phase 0 slice 1: api_ms / num_turns telemetry (non-counters) and the unattributed role

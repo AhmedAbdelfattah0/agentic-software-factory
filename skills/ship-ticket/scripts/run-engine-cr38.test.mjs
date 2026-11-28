@@ -348,7 +348,7 @@ test('4505924499 with engine state the carrier refuses a REPAIR whose writes lea
 
 // ------------------------------------------------------------------ MINOR: attempts, scope, unit checks
 
-test('4505924504 a released attempt that settles without an envelope counts as unknown usage (budget_unenforceable)', { skip: WIN_SKIP }, (t) => {
+test('4505924504 a released attempt that settles without an envelope counts as unknown usage (usage_unknown)', { skip: WIN_SKIP }, (t) => {
   const fx = fixture(t, { config: { timeoutMs: 1000, budget: { ticket_tokens: 1000000 } }, behaviour: { a: { hang: true } } });
   ok(fx.cli('init', { dag: fx.dagFile }));
   const r = fx.cli('drive');
@@ -356,7 +356,7 @@ test('4505924504 a released attempt that settles without an envelope counts as u
   const a = fx.readState().attempts.find(x => x.kind === 'node');
   assert.equal(a.status, 'timed_out');
   assert.ok(fx.readState().usage.some(u => u.source_execution_id === a.attempt_id), 'the attempt has a usage record');
-  assert.deepEqual(fx.cli('status').out.budget.flags, ['budget_unenforceable']);
+  assert.equal(fx.cli('status').out.budget.usage_unknown, true);
 });
 
 const unitNode = (id, extra = {}) => ({ id, writes: [`src/${id}.txt`], checks: ['ok'], ...extra });

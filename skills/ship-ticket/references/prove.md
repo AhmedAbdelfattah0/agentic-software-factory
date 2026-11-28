@@ -106,7 +106,7 @@ PROVE correction collects every failure from the full proof chain first, fixes t
 one consolidated batch, rederives affected inventories and reruns affected commands,
 and continues while each round makes progress (strictly fewer failures, or a failure
 set not seen before). It returns to the owner after two consecutive rounds without
-progress, at the 6-round backstop, or when the budget is spent
+progress, or at the 6-round backstop; token usage never stops it
 (`SKILL.md` "Bounded repair"). PROVE prepares
 screen classifications and pinned inputs; the complete screen comparison belongs
 to REVIEW's independent primary workflow.

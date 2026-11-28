@@ -64,10 +64,10 @@ the same scripts step by step.
 | Candidate identity | Engine-enforced | A hash of every changed and untracked path against the merge base; review and ship must name the same id. |
 | Ship-ready gate | Engine-enforced | Last review PASS, same candidate, all nodes done, risk evidence present, and the engine runs the plan's `testCommands` itself (`missing_local_proof`). |
 | Bounded repair (review) | Engine-enforced | One repair per review execution and one confirmation (`confirmation_spent`, `round_limit`). |
-| Corrective iteration (PROVE, gate failures, review RETRY) | Agent procedure (instruction, not an engine check) | The Factory corrects while each round makes progress and returns to the owner after two rounds with none, at a 6-round backstop, or when the approved budget is spent. |
+| Corrective iteration (PROVE, gate failures, review RETRY) | Agent procedure (instruction, not an engine check) | The Factory corrects while each round makes progress and returns to the owner after two rounds with none, or at a 6-round backstop. Token usage never stops it. |
 | CI before tracker close | Agent procedure | `ci-snapshot` and `ci-classify` read CI results; the orchestrator closes the tracker item after the PR's CI passes. |
 | Security control selection and pairs | Agent procedure, engine-enforced | The model writes the security facts, the selector evaluates them and an unknown fact selects the control. With `securityPolicy` 2, each boundary and control pair needs an accepted RED and a passing named spec. The repository's own measurement did not show useful selection, so no precision or security-improvement claim is made. |
-| Token budgets | Engine-enforced, opt-in | `config.budget` ceilings stop new dispatch (`budget_stop`); unknown usage flags the budget instead of reading as 0. |
+| Token telemetry | Passive record, never enforced | Token usage never gates anything (owner decision D9): `config.budget` is an optional estimate recorded beside the actual usage and the difference; no stop, warning, judgment or owner step at any overrun. Unknown usage is recorded as `usage_unknown`, never read as 0. |
 | Usage capture | Engine-enforced | Provider-reported counters only; unknown stays unknown. |
 | Run log and telemetry | Engine tooling, orchestrator-invoked | Best-effort phase timing and events under Git metadata; never blocks. |
 

@@ -15,7 +15,7 @@
  *   call (asserted inside `call`, for every output path including stops and errors).
  * Every test drives the REAL engine CLI on the shared fixture (engine-test-fixture.mjs), except the block
  * marked "pure core", which feeds crafted states to the exported pure functions for classes a policy-1
- * fixture cannot reach (policy 2 reassess, spent budget, untrusted authority, live attempts).
+ * fixture cannot reach (policy 2 reassess, untrusted authority, live attempts).
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -674,16 +674,28 @@ test('T8 pure core: REASSESS is accepted only on the whole tuple (candidate, pla
   assert.equal(refused.phase, 'REASSESS');
 });
 
+test('D9 pure core: token usage over its estimate (10x, either status shape) or unknown is never a blocker; the review dispatch proceeds', () => {
+  const shapes = [
+    // the status shape an engine before D9 wrote (state/flags), and the D9 passive telemetry (estimate/actual/delta)
+    { ticket: { state: 'stop_dispatch', used: 1100, limit: 100 }, phase: null, flags: ['budget_unenforceable'] },
+    { ticket: { estimate: 100, used: 1100, delta: 1000 }, phase: null, usage_unknown: true },
+  ];
+  for (const budget of shapes) {
+    const n = pureNext((i) => { i.statusOut.budget = budget; });
+    assert.equal(n.action, 'dispatch', JSON.stringify(n));
+    assert.equal(n.phase, 'REVIEW');
+    assert.deepEqual(acceptedView(crafted((i) => { i.statusOut.budget = budget; })).blockers, []);
+  }
+});
+
 test('T8 pure core: owner-class and unreadable states all STOP', () => {
   const cases = [
-    ['budget_spent', 'owner', (i) => { i.statusOut.budget = { ticket: { state: 'stop_dispatch', used: 10, limit: 10 }, phase: null, flags: [] }; }],
-    ['budget_unknown', 'unknown', (i) => { i.statusOut.budget = { ticket: { state: 'ok' }, phase: null, flags: ['budget_unenforceable'] }; }],
     ['authority_untrusted', 'owner', (i) => { i.statusOut.authority_untrusted = [{ event: 'RETRY' }]; }],
     ['security_reapproval', 'judgment', (i) => { i.statusOut.judgments = [{ code: 'security_reapproval', node: null, reason: 'r' }]; }],
     ['attempts_live', 'unknown', (i) => { i.S.attempts = [{ attempt_id: 'x', status: 'running' }]; }],
     ['unit_review_owed', 'off_happy_path', (i) => { i.statusOut.unit_reviews_pending = ['u1']; }],
     ['candidate_unavailable', 'unknown', (i) => { i.candidate = { candidate_id: null, reason: 'git failed' }; }],
-    ['drive_judgment', 'judgment', (i) => { i.last.value.outcome = 'judgment'; i.last.value.judgments = [{ code: 'budget_stop', node: null }]; }],
+    ['drive_judgment', 'judgment', (i) => { i.last.value.outcome = 'judgment'; i.last.value.judgments = [{ code: 'round_limit', node: null }]; }],
     ['state_unreadable', 'unknown', (i) => { i.statusError = { code: 'legacy_state', message: 'm' }; }],
   ];
   for (const [code, cls, over] of cases) {

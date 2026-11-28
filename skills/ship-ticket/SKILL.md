@@ -357,18 +357,13 @@ PROVE and REVIEW have separate limits:
   keeps correcting while each round makes progress. Progress means strictly FEWER
   failures, or a failure set not seen in an earlier round; an oscillation
   (A, then B, then A again) is not progress. It stops and returns to the owner when
-  two consecutive rounds show no progress, or the approved budget is spent (the
-  ticket's `config.budget` token ceiling, mandatory for any run that uses this
-  path, a single ticket included; orchestrator edit rounds and gate re-runs count
-  against it; and the second-reviewer cap), or the fix would change requirements,
-  scope, security guarantees or an owner-reserved decision. Before EACH correction
-  round (an orchestrator direct edit or a gate re-run included) the orchestrator
-  imports the usage so far with the existing usage tooling and checks the
-  `config.budget` headroom; no headroom, or usage that is unknown or cannot be
-  imported, stops to the owner. `config.budget` is set in the plan template's
-  Budget line before approval, for every plan; a plan without one has no
-  Factory-owned correction and the ticket returns to the owner at the first
-  failure. A backstop ceiling of 6 corrective rounds per ticket is a safety net,
+  two consecutive rounds show no progress, or the second-reviewer cap is spent,
+  or the fix would change requirements, scope, security guarantees or an
+  owner-reserved decision. Token usage never gates anything: `config.budget` is
+  an optional estimate recorded as passive telemetry, and usage over it (by any
+  amount) never stops, warns, re-plans or returns to the owner
+  ([references/execution-harness.md](references/execution-harness.md) "Token
+  telemetry"). A backstop ceiling of 6 corrective rounds per ticket is a safety net,
   not a target. No signature
   bookkeeping, no notes file and no per-class caps apply; these are instructions,
   not engine checks.
@@ -822,7 +817,7 @@ whether the cause is the work, the run data or the gate. Fix the work or the run
 data inside the approved plan and retry under the corrective-iteration rule in
 "Bounded repair" (all failures first, one consolidated batch, continue while each
 round makes progress). Never bypass or waive a gate. STOP and return to the
-owner for an owner-reserved class (security, approval, ownership, spent budget,
+owner for an owner-reserved class (security, approval, ownership,
 a drift, security or base `RETRY`, any security review or finding), for any category listed above, when the cause
 is the gate itself, a nonzero `ship-ready-check`, or when two consecutive rounds show no progress (or the backstop ceiling of 6 corrective rounds is reached). The
 judgment-code table in [references/execution-harness.md](references/execution-harness.md)
@@ -835,7 +830,7 @@ with SHIP's manual confirmations in the SHIP_READY event and the PR body.
 
 Use **FAIL** for:
 
-- two consecutive correction rounds show no progress, or the approved budget is spent;
+- two consecutive correction rounds show no progress, or the second-reviewer cap is spent;
 - REVIEW confirmation fails or requests another candidate change and the
   corrective-iteration rule does not allow a Factory `RETRY` (a residual
   within the plan's recorded ship threshold is a follow-up, not a failure);

@@ -27,7 +27,6 @@ orchestrator is the party that runs reviews; the engine never dispatches REVIEW.
 | `confirmation_spent`, `round_limit` | A second confirmation or second review repair was requested, or a `prove`-kind repair item exceeded the engine backstop (no production path enqueues one; routine PROVE correction follows the progress rule in the spine). |
 | `ownership_violation`, `repair_outside_findings` | A worker wrote outside its declared set. |
 | `post_freeze_drift` | The tree changed after the review freeze beyond covered drift. |
-| `budget_stop` | A configured token ceiling is spent. |
 | `ADMISSION_REFUSED` (logged) | The estimate-based admission held extra parallel work. |
 
 ## Ownership
@@ -54,9 +53,17 @@ one host.
 
 ## Opt-in features
 
-Risk floor (`.ship-ticket/risk-paths.json`), units, test kinds, token budgets, pinned base and
+Risk floor (`.ship-ticket/risk-paths.json`), units, test kinds, pinned base and
 repository identity apply only to runs and repositories that opt in. Each has its own test suite; none
 is exercised on a recorded real ticket.
+
+## Token telemetry
+
+Token usage never gates anything (owner decision D9, 2026-11-28). A DAG's optional `config.budget` is an
+estimate; the engine records it beside the actual usage and the difference (`status.budget`) for
+retrospective analysis. Usage over the estimate, by any amount, triggers no stop, warning, judgment, re-plan
+or owner step, and no hard token limit exists. Real provider quota or availability errors are handled as
+provider facts, not as token budgets.
 
 ## Review and reviewer identity
 

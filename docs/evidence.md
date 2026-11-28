@@ -18,7 +18,7 @@ asserts the behaviour and `validate.yml` runs it. The CI workflow is
 ## Covered by tests, not yet exercised on a real ticket
 
 Digest binding, the RED gate, the review and ship-ready gates, ownership detection, crash resume,
-candidate integrity, budgets and the opt-in risk floor, units and test kinds. The suites assert the
+candidate integrity, token telemetry and the opt-in risk floor, units and test kinds. The suites assert the
 behaviour; no clean engine-driven ticket on a real repository has yet been recorded.
 
 ## Real-workflow evidence

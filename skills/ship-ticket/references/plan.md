@@ -110,8 +110,8 @@ boundary: there is no per-wave approval and no per-ticket approval.
    byte for byte; and the "After approval" statement: "For each ticket below,
    the Factory will copy its plan file, retain its debate bundle and record its
    START with these digests and run ids." The ExitPlanMode text quotes each
-   ticket's scope-contract block. Each ticket's own plan carries its
-   `config.budget` token ceiling (see the template).
+   ticket's scope-contract block. A ticket's own plan may carry its
+   optional `config.budget` token estimate (see the template).
 4. After the one approval the Factory, without asking again, reads the APPROVED
    unified file back from disk (not the scratchpad draft) and records its path
    and digest in the queue header. Per ticket it then does the following: create
@@ -263,7 +263,7 @@ unit · file ownership · expected size and risk · overhead vs value>. <If spli
 `config.acceptanceIds`, `config.unitRecheckCeiling` and its reasoning, and whether
 `config.unitReview` is on.>
 
-**Budget:** `config.budget` token ceiling: <the ceiling for this ticket>. Mandatory for any run that uses the Factory's correction or `RETRY` path, a single ticket included. Orchestrator edit rounds and gate re-runs count against it.
+**Token estimate (optional):** `config.budget`: <estimated tokens for this ticket, or none>. Token usage never gates anything: the estimate is passive telemetry recorded beside the actual usage and the difference for retrospective analysis, never a ceiling, and usage over it by any amount needs no re-plan, approval or new START ([execution-harness.md](execution-harness.md) "Token telemetry").
 
 ## 3. Risks & unknowns
 | Risk / unknown | Why it matters | What I'll do |

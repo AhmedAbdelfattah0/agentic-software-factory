@@ -2,7 +2,7 @@
  * Attempts of the durable run engine (run-engine.mjs): the launch handshake through the carrier's
  * launcher, whole-group quiescence before an attempt is recorded, reconciliation of attempts left
  * by a crashed engine or gate (workers, RED runners and proof runners alike), the RED dispatch
- * barrier, budget admission, durable resource locks, builder identities and finding-bound REPAIR
+ * barrier, durable resource locks, builder identities and finding-bound REPAIR
  * with its repair record. `E` is the command context built by run-engine.mjs `open()`.
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -27,7 +27,7 @@ const itemOf = (S, a) => (a.kind === 'repair' ? S.repairs.find(r => r.id === a.n
 const pushJudgment = (S, code, node, reason) => { if (!S.judgments.some(j => j.code === code && j.node === node)) S.judgments.push(judgment(code, node, reason)); };
 const transientOnce = (list, code, node, reason) => { if (!list.some(j => j.code === code && j.node === node)) list.push(judgment(code, node, reason)); };
 
-// ---- usage and budgets ------------------------------------------------------------------------
+// ---- usage telemetry ---------------------------------------------------------------------------
 
 /** Whether `r` passes usage.mjs record validation (provider, run_id, counters, source fields). */
 function validUsage(r) {
@@ -37,8 +37,8 @@ function validUsage(r) {
 /**
  * Engine usage plus the imported file (`<ticket>.usage.jsonl`: usage.mjs import-session/import-codex
  * --out), deduplicated by source_execution_id (the engine's aggregate wins). An import line that is
- * malformed or not a valid usage record counts as unknown usage, so the budget is flagged
- * unenforceable rather than silently under-counted or crashing the command.
+ * malformed or not a valid usage record counts as unknown usage (telemetry `usage_unknown`) rather than
+ * silently under-counted or crashing the command.
  */
 export function usageRecords(E) {
   const { S, P } = E;
@@ -53,20 +53,14 @@ export function usageRecords(E) {
   return addUsageRecords(S.usage, imported).records;
 }
 
-/** Budget verdict for `phase` (or the ticket only); null when the DAG sets no budget. */
+/**
+ * Passive token telemetry (estimate, actual, delta) for `phase` (or the ticket only); null when the DAG sets no estimate.
+ * D9: read by `status` for reporting only; no dispatch, admission, retry or recovery decision reads it.
+ */
 export function budgetVerdict(E, phase) {
   const budget = E.S.config.budget;
   if (!budget) return null;
   return evaluateBudget(usageRecords(E), budget, phase ? { phase } : {});
-}
-
-/** Budget admission immediately before a node or repair dispatch, with its phase. */
-function budgetOk(E, transient, phase) {
-  const v = budgetVerdict(E, phase);
-  if (!v || v.dispatch_allowed) return true;
-  const which = v.phase?.state === 'stop_dispatch' ? `${phase} phase budget reached (${v.phase.used}/${v.phase.limit})` : `ticket budget reached (${v.ticket.used}/${v.ticket.limit})`;
-  transientOnce(transient, 'budget_stop', null, which);
-  return false;
 }
 
 // ---- RED barrier ------------------------------------------------------------------------------
@@ -233,8 +227,8 @@ export async function settle(E, a, { timedOut = false, wait = 0, owned = false, 
   // the envelope is kept as evidence (late_envelope), never recorded as the attempt's result.
   if (env && deadlineWins) { a.late_envelope = { file: a.envelope_file, exit_code: env.exit_code ?? null }; env = null; }
   if (env) return record(E, a, item, env);
-  // Released and ran, but left no envelope (timeout, crash): its usage is unknown, never zero, so the
-  // budget is flagged unenforceable instead of admitting a redispatch against an under-count.
+  // Released and ran, but left no envelope (timeout, crash): its usage is recorded as unknown, never zero
+  // (passive telemetry: it gates nothing).
   S.usage.push({ provider: a.provider, run_id: S.run_id, node_id: a.node, phase: a.phase, role: a.role, attempt_id: a.attempt_id,
     source: 'engine', source_execution_id: a.attempt_id });
   if (timedOut) { a.status = 'timed_out'; item.state = 'failed'; item.reason = 'timeout (never retried automatically)'; return; }
@@ -387,7 +381,7 @@ function fits(E, n, running) {
 
 /**
  * Continuous dispatch of ready nodes (deps done, a dependency of another unit verified, valid RED
- * for RED-bearing deps, budget admitted) until nothing more can start. While `hold()` (unit checks
+ * for RED-bearing deps) until nothing more can start. While `hold()` (unit checks
  * are ready) no new node starts; once nothing runs, `onIdle` (the unit checks) runs, and when it
  * reports progress dispatch continues, so checks are never starved by continuous dispatch. Every launched
  * attempt is awaited (allSettled) before this returns or rethrows, so the caller's lock is never
@@ -397,22 +391,21 @@ export async function dispatchNodes(E, transient, { onIdle, hold } = {}) {
   const { S } = E;
   const limit = scope(S, E.ctx.until);
   const running = new Map();
-  let failure = null, stop = false;
+  let failure = null;
   try {
     for (;;) {
-      if (!failure && !stop && !S.judgments.length && !hold?.()) {
+      if (!failure && !S.judgments.length && !hold?.()) {
         const states = stateMemo(E);
         const ready = Object.values(S.nodes).filter(n => ['pending', 'stale'].includes(n.state) && !running.has(n.id)
           && (!limit || limit.has(n.id)) && n.deps.every(d => depDone(E, n, d, states)) && redReady(E, n, transient));
         for (const n of ready) {
-          if (!budgetOk(E, transient, n.phase)) { stop = true; break; }
           if (!fits(E, n, running.keys())) continue;
           running.set(n.id, runAttempt(E, { kind: 'node', item: n, phase: n.phase, writes: n.writes, othersOwned: n.othersOwned,
             allowed: n.writes, promptFile: n.promptFile, resources: n.resources })
             .catch(e => { failure ??= e; }).finally(() => running.delete(n.id)));
         }
       }
-      if (!running.size) { if (!failure && !stop && onIdle && await onIdle()) continue; break; }
+      if (!running.size) { if (!failure && onIdle && await onIdle()) continue; break; }
       await Promise.race(running.values());
     }
   } finally { await Promise.allSettled(running.values()); }
@@ -459,7 +452,7 @@ function startsFromFreeze(E, r, transient) {
   return false;
 }
 
-/** Authorized repairs, each through the RED barrier and budget admission; counters move only on a real dispatch. */
+/** Authorized repairs, each through the RED barrier; counters move only on a real dispatch. */
 export async function runRepairs(E, transient) {
   const { S } = E;
   let batchOpen = false;
@@ -470,7 +463,6 @@ export async function runRepairs(E, transient) {
     if (!repairRedReady(E, r, transient)) continue;
     if (r.kind === 'review' && !startsFromFreeze(E, r, transient)) continue;
     if (r.kind === 'unit-review' && !unitRepairCurrent(E, r)) continue;
-    if (!budgetOk(E, transient, auth.phase)) break;
     const onLaunch = () => {
       if (r.kind === 'review' || r.kind === 'unit-review') {
         const rounds = repairRounds(S, r);

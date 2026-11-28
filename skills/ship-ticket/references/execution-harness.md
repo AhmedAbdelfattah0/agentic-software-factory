@@ -276,19 +276,19 @@ node <SHIP_TICKET_SKILL>/scripts/usage.mjs summary /abs/scratch/usage.jsonl --ru
 `--run-id` restricts the sum to one run when the log is shared; without it every
 run in the file is summed.
 
-Imports and budgets:
+Imports and token telemetry:
 
 ```bash
 node <SHIP_TICKET_SKILL>/scripts/usage.mjs import-session <session.jsonl> --run-id <ID> --out <usage.jsonl> [--since iso] [--until iso] [--role orchestrator|reviewer|unattributed] [--subagent-role orchestrator|reviewer|unattributed] [--phase <PHASE>]
 node <SHIP_TICKET_SKILL>/scripts/usage.mjs import-codex <relay-result.json> --run-id <ID> --out <usage.jsonl> [--phase <PHASE>]
 ```
 
-The budget metric
+The token metric
 is `processed_tokens = input + output + cache_read + cache_write` (or
-`output_tokens`); see Budgets below. With the run engine, import into
+`output_tokens`); see Token telemetry below. With the run engine, import into
 `git rev-parse --git-path ai-skills/ship-ticket/<TICKET>.usage.jsonl` (a legacy run; a durable run, the default:
-`<git-common-dir>/ai-skills/ship-ticket/runs/<TICKET>/usage.jsonl`): the engine reads
-that file before every dispatch.
+`<git-common-dir>/ai-skills/ship-ticket/runs/<TICKET>/usage.jsonl`): `status` reads
+that file for its token telemetry.
 
 ## Run engine
 
@@ -311,7 +311,7 @@ reviewer independence, billing and ownership checks are the carrier's and
 
 **Files**, never committed. Every NEW run (S1) is a **durable run** (policy versions 13-24): its ledger `state.json`, the
 engine's event file `engine.jsonl`, `lock`, `attempts/` (per-attempt envelopes and outputs) and `usage.jsonl` (imported
-orchestrator/reviewer usage, read by budgets) live in one run directory of the git COMMON dir,
+orchestrator/reviewer usage, read by the token telemetry) live in one run directory of the git COMMON dir,
 `<git-common-dir>/ai-skills/ship-ticket/runs/<TICKET>/`, so `git worktree remove` loses none of them. A run started before
 S1 (policy versions 1-12), or a new run under the documented escape hatch (the DAG's `config.durableRun: false`, or
 `SHIP_TICKET_PLACEMENT=legacy` in the engine's environment), keeps the legacy placement under
@@ -368,7 +368,7 @@ are refused, never dropped.
 
 - `config`: `provider`, `modelMap`, `permissionMode`, `billing`, `width`,
   `memoryBudgetMb`, `timeoutMs` (clamped to 1 s..1 h for both validation and the
-  timer), `budget` (`{ticket_tokens, phase_tokens}`), `candidateExclusions` (exactly
+  timer), `budget` (`{ticket_tokens, phase_tokens}`: token ESTIMATES, passive telemetry, see Token telemetry), `candidateExclusions` (exactly
   `.specs/plans/<TICKET>.md` and `session-log.md`, or absent; anything else is
   `dag_invalid` at `init`), `testCommands` (`{<name>: {cmd, args, format?}}`; an entry
   with `format` `tap|vitest-json|jest-json` is a RED runner, and `gate ship-ready`
@@ -395,7 +395,7 @@ are refused, never dropped.
 - `acceptance` and `config.acceptanceIds` are legal on a DAG without units; [units.md](units.md) applies only when a node has `unit`.
 
 `status` prints the compact `ship-ticket-engine-status-v1` view, including
-`red_pending`, `budget` (`{ticket, phase, flags}` or null) and `telemetry_degraded`, and `truncated_outputs` only when an attempt's output passed the capture cap (below).
+`red_pending`, `budget` (`{ticket, phase, usage_unknown}` or null) and `telemetry_degraded`, and `truncated_outputs` only when an attempt's output passed the capture cap (below).
 
 **Approval binding.** `init` recomputes the plan narrative digest (the plan
 file with the text between the RUN-STATE markers removed) and requires it to
@@ -770,14 +770,13 @@ ship-ready`. REPAIR authorization comes from engine state (the review chain), in
 the engine and in `carrier.mjs` whenever a state file exists; the carrier's
 timing-log check is only the fallback when no state file exists, and a missing or
 unwritable log only degrades telemetry. A repair goes through the RED barrier (it
-inherits the prerequisites of every node whose writes it overlaps) and budget
-admission like a node.
+inherits the prerequisites of every node whose writes it overlaps) like a node.
 
 **Round counters.** PROVE correction follows the corrective-iteration rule in `SKILL.md` "Bounded repair"
 (instructions, not engine checks): strictly fewer failures or a failure set not seen before counts as progress,
-two consecutive rounds without progress or a backstop of 6 corrective rounds per ticket stop it, and the
-ticket's `config.budget` is mandatory for any run that uses this path. The Factory makes routine corrections
-as an edit plus a gate re-run. Before EACH correction round (an orchestrator direct edit or a gate re-run included) the orchestrator imports the usage so far with the existing usage tooling (`usage.mjs import-session` / `import-codex`) and checks the `config.budget` headroom; no headroom, or usage that is unknown or cannot be imported, stops to the owner, never a proceed-on-unknown. `config.budget` is set in the plan template's Budget line BEFORE approval, for every plan (single tickets included), so no later plan edit or re-approval is needed to get a correction budget; a plan without one has no Factory-owned correction, and the ticket returns to the owner at the first failure. The engine keeps a backstop counter `rounds.prove_repair_batches` (cap 2) for a
+two consecutive rounds without progress or a backstop of 6 corrective rounds per ticket stop it. Token usage
+never gates anything, a correction round included (see Token telemetry). The Factory makes routine corrections
+as an edit plus a gate re-run. The engine keeps a backstop counter `rounds.prove_repair_batches` (cap 2) for a
 `prove`-kind repair item; no production path enqueues one today, so it never limits routine correction. REVIEW
 keeps one repair and one confirmation per review execution (`rounds.review_repairs[<review_execution>]`).
 Beyond them, or after a terminal failure, is `round_limit`: a new original review needs a RUN-STATE `RETRY`,
@@ -802,7 +801,6 @@ not list goes to the OWNER (fail closed).
 | `review_terminal` (an overflow FAIL) | Owner | matches the engine's own classification |
 | `stale_candidate` and `post_freeze_drift`, `repair_unauthorized` | Owner | the frozen candidate and its authorization are a gate-safety boundary |
 | `run_mismatch`, `approval_mismatch`, `dag_mismatch` | Owner | the approved plan or DAG changed, which is a material change |
-| `budget_stop` | Owner | the approved budget is spent |
 | unit codes `unit_review_terminal`, `parent_ceiling`, `unit_check_failed`, `unit_invalidation_storm` | Owner | units are opt-in; a unit's RETRY and its clear (`UNIT_CLEAR`) stay with the owner ([units.md](units.md)) |
 | any security refusal or waiver ([security-risk.md](security-risk.md)) | Owner | security exceptions are never Factory-owned |
 
@@ -820,23 +818,26 @@ the orchestrator or user: `run_mismatch`, `approval_mismatch`, `dag_mismatch`,
 `crash_with_writes`, `quiescence_unknown` (always on Windows, where descendants
 can outlive the leader: known limit N7 below),
 `ownership_violation`, `ownership_unavailable`, `post_freeze_drift`,
-`repair_outside_findings`, `repair_unauthorized`, `round_limit`, `budget_stop`,
+`repair_outside_findings`, `repair_unauthorized`, `round_limit`,
 `red_invalidated`, `red_required`, `candidate_unavailable` and `repair_failed` (computed: a final-review
 repair that failed; it is terminal for its review execution, and a RETRY of that review (see the table below for whose)
 cancels it as `superseded by retry`). The gate adds
 unsupported RED runner output, `dispatched_before_red` and a terminal overflow FAIL
 (`review_terminal`) (all returned with `judgment_point: true`; the CLI exits 2).
 
-**Budgets.** `config.budget` holds dispatch thresholds: a warning at 80%, and at
-100% no new dispatch (`budget_stop`, a judgment point). Before every node **and
-repair** dispatch the engine re-reads its own records plus `<TICKET>.usage.jsonl`,
-deduplicated by `source_execution_id`, and evaluates `phase_tokens` with the
-dispatching item's phase. Work in flight can overshoot, and that is reported.
-Unknown usage (including a malformed import line, and an attempt that ran but settled without an
-envelope: a timeout or a crash) sets the `budget_unenforceable`
-flag rather than counting as within budget; the engine does not stop on it.
-`status.budget` shows the ticket and phase state (`ok|warn|stop_dispatch|unknown`)
-and the flags, plus `phase_unknown` (`{records, tokens}`) when imported usage carries no phase. Budgets never change review or model policy.
+**Token telemetry.** Token usage never gates anything (owner decision D9, 2026-11-28). `config.budget`
+(`{ticket_tokens, phase_tokens}`) holds token ESTIMATES: measurements for retrospective analysis, never
+constraints. The engine records them beside the actual usage (its own records plus `<TICKET>.usage.jsonl`,
+deduplicated by `source_execution_id`) and the difference; usage 10%, 100% or 1,000% over an estimate changes
+nothing. No dispatch, admission, routing, retry, recovery, escalation, completion or owner step reads it, there
+is no warning, judgment point or stop for it at node, phase, ticket or wave level, and no opt-in hard limit.
+`status.budget` reports `ticket` (`{estimate, used, delta}`), `usage_unknown` (true when some usage is
+unreported: a malformed import line, or an attempt that ran but settled without an envelope, which is counted
+as unknown, never 0) and `phase_unknown` (`{records, tokens}`) when imported usage carries no phase; `eval.mjs`
+reports the per-phase totals. What still bounds a run is unrelated to tokens: bounded retries and repair rounds,
+no-progress detection, deadlines and timeouts, host admission, quality gates and reviews, security and
+authorization boundaries, and real provider quota or availability errors (429, quota exhausted), which are
+provider facts, not token budgets.
 
 ## Gate verifier
 

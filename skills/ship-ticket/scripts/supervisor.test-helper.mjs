@@ -11,7 +11,7 @@
  * -> (drive) confirmation_owed -> (gate review confirmation) PASS: ship_owed | FAIL: confirmation_fail; ship_owed ->
  * (gate ship-ready) published -> owner_publish. The fake `gate review` keeps the real gate's one-record-per-execution and
  * repair-brief (`repair_prompt_missing`) rules and its unknown-field `bad_input` refusal; behaviour `lock` makes a command
- * fail as the engine does under a held run lock (exit 1, nothing recorded). Other phases: owner_stop (budget_spent), terminal (review_terminal).
+ * fail as the engine does under a held run lock (exit 1, nothing recorded). Other phases: owner_stop (run_mismatch), terminal (review_terminal).
  *
  * CLI (the crash tests): node supervisor.test-helper.mjs tick|sweep <worldDir> [<boundary>:<n> kill|hang]
  *   kill: SIGKILL itself at the n-th hit of that boundary; hang: never resolve there (the journal lock stays held).
@@ -149,7 +149,7 @@ function fakeNext(dir, t) {
     case 'ship_owed': return go('run', 'gate ship-ready', {});
     case 'published': return stop('owner_publish', 'owner');
     case 'confirmation_fail': return stop('confirmation_fail', 'owner');
-    case 'owner_stop': return stop('budget_spent', 'owner');
+    case 'owner_stop': return stop('run_mismatch', 'owner');
     case 'terminal': return stop('review_terminal', 'owner');
     case 'judgment': return stop('node_failed', 'judgment');
     default: return stop('unknown_phase', 'unknown');
